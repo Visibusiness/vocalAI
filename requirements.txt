@@ -6,3 +6,6 @@ nvidia-cublas-cu12
 nvidia-cudnn-cu12
 nvidia-curand-cu12
 ollama
+piper-tts
+webrtcvad-wheels
+setuptools
