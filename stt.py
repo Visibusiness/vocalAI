@@ -3,21 +3,21 @@ import sounddevice as sd
 import numpy as np
 from faster_whisper import WhisperModel
 import ollama
-<<<<<<< Updated upstream
-import tempfile
-import wave
-import subprocess
-from piper import PiperVoice
-=======
 import subprocess
 import json
 import datetime
 import asyncio
 import edge_tts
 import webrtcvad
->>>>>>> Stashed changes
 
-# === CONFIGURARE NVIDIA ===
+# === IMPORT CALENDAR ===
+try:
+    from calendar_tool import create_appointment
+except ImportError:
+    print("⚠️ Nu am găsit calendar_tool.py!")
+    def create_appointment(s, d): return False
+
+# === CONFIG NVIDIA ===
 def setup_nvidia_libs():
     venv_base = os.environ.get('VIRTUAL_ENV', os.path.join(os.getcwd(), 'venv'))
     found_libs = []
@@ -30,53 +30,32 @@ def setup_nvidia_libs():
 
 setup_nvidia_libs()
 
-<<<<<<< Updated upstream
-# === SETĂRI ===
-SAMPLE_RATE = 16000          # pentru Whisper STT
-PIPER_SAMPLE_RATE = 22050    # pentru Piper TTS (schimbă la 16000 dacă modelul tău e 16k)
-DURATION = 5                 # secunde înregistrare
-WHISPER_MODEL = "large-v3"
-LLM_MODEL = "llama3.2"
-PIPER_MODEL = "ro_RO-mihai-medium.onnx"
-
-print("⌛ Încărcare modele pe RTX 2060 Super...")
-stt_model = WhisperModel(WHISPER_MODEL, device="cuda", compute_type="float16")
-voice = PiperVoice.load(PIPER_MODEL)
-=======
 # === SETTINGS ===
 SAMPLE_RATE = 16000
-WHISPER_MODEL = "small" # Recomandat pentru viteză
+WHISPER_MODEL = "distil-large-v3" # Recomandat pentru viteză
 LLM_MODEL = "qwen2.5:7b"          # Recomandat pentru română (sau llama3.2)
 VOICE_NAME = "ro-RO-AlinaNeural"  # Vocea ALINA
 OUTPUT_FILENAME = "raspuns_visi.mp3"
 
 print(f"⌛ Încărcare Whisper ({WHISPER_MODEL})...")
 stt_model = WhisperModel(WHISPER_MODEL, device="cuda", compute_type="float16")
->>>>>>> Stashed changes
 
-print([m for m in dir(voice) if not m.startswith('_')])
+# === SYSTEM PROMPT ===
+now = datetime.datetime.now()
+today_str = now.strftime("%Y-%m-%d %H:%M")
+day_name = now.strftime("%A")
 
-# Prompt personalizat pentru Visi
-chat_history = [
-    {'role': 'system', 'content': 'Ești un asistent vocal prietenos. Utilizatorul se numește Visi. Răspunde scurt în română.'}
-]
+chat_history = [{
+    'role': 'system',
+    'content': (
+        f'Ești Visi, recepționer virtual la un salon. Azi este {today_str} ({day_name}). '
+        'Vorbește doar Română. '
+        'Cere: Serviciu, Nume, Dată, Oră. '
+        'Când e confirmat, generează DOAR JSON: '
+        '{"action": "book", "nume": "Nume", "data": "YYYY-MM-DDTHH:MM:00"}'
+    )
+}]
 
-<<<<<<< Updated upstream
-# === DETECTARE PLAYER AUDIO ===
-def get_audio_player():
-    """Detectează automat playerul audio disponibil."""
-    for player in ["paplay", "aplay", "ffplay"]:
-        result = subprocess.run(["which", player], capture_output=True, text=True)
-        if result.returncode == 0:
-            return player
-    return None
-
-AUDIO_PLAYER = get_audio_player()
-if not AUDIO_PLAYER:
-    print("⚠️ Niciun player audio găsit! Instalează pulseaudio-utils: sudo apt install pulseaudio-utils")
-
-# === FUNCȚIE SINTEZĂ VOCALĂ ===
-=======
 # === AUDIO PLAYER (MP3 Support) ===
 def get_mp3_player():
     # Căutăm playere capabile de MP3
@@ -96,39 +75,8 @@ async def _generate_audio(text):
     communicate = edge_tts.Communicate(text, VOICE_NAME)
     await communicate.save(OUTPUT_FILENAME)
 
->>>>>>> Stashed changes
 def speak(text):
-    output_file = None
     try:
-<<<<<<< Updated upstream
-        print(f"🤖 Agent: {text}")
-
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmpfile:
-            output_file = tmpfile.name
-
-        # Colectăm raw PCM bytes din generator
-        raw_audio = b"".join(voice.synthesize_stream_raw(text))
-
-        if not raw_audio:
-            print("⚠️ Piper nu a generat audio.")
-            return
-
-        # Scriem manual WAV
-        with wave.open(output_file, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)  # 16-bit
-            wf.setframerate(PIPER_SAMPLE_RATE)
-            wf.writeframes(raw_audio)
-
-        sd.stop()
-        subprocess.run([AUDIO_PLAYER, output_file], check=True)
-
-    except Exception as e:
-        print(f"❌ Eroare: {e}")
-    finally:
-        if output_file and os.path.exists(output_file):
-            os.unlink(output_file)
-=======
         print(f"👩 Agent (Alina): {text}")
         if not text:
             return
@@ -274,15 +222,8 @@ def record_until_silence(sample_rate=16000,
 # =========================================================
 # =====================  MAIN LOOP  =======================
 # =========================================================
->>>>>>> Stashed changes
 
-# === FUNCȚIE PRINCIPALĂ ===
 def main():
-<<<<<<< Updated upstream
-    print(f"\n🚀 AGENT ACTIV | Salut, Visi!")
-    print(f"🔊 Player audio: {AUDIO_PLAYER}")
-    print("🎤 Te ascult... (Ctrl+C pentru oprire)\n")
-=======
     if not AUDIO_PLAYER:
         print("\n❌ EROARE: Nu am găsit 'ffplay' sau 'mpv'.")
         print("Instalează: sudo apt install ffmpeg\n")
@@ -290,55 +231,62 @@ def main():
 
     print(f"\n🚀 AGENT ACTIV (Alina) | {today_str}")
     print("🎤 Vorbește liber...\n")
->>>>>>> Stashed changes
 
     while True:
         try:
-            print("[Ascult...]", end="", flush=True)
+            recording = record_until_silence()
+            if recording is None:
+                continue
 
-            # Înregistrare voce
-            recording = sd.rec(
-                int(DURATION * SAMPLE_RATE),
-                samplerate=SAMPLE_RATE,
-                channels=1,
-                dtype="int16"
-            )
-            sd.wait()
-
-            print("\r[Procesez...]", end="", flush=True)
-
-            # Conversie pentru Whisper (float32 normalizat)
             audio_data = recording.flatten().astype(np.float32) / 32768.0
 
             segments, _ = stt_model.transcribe(
                 audio_data,
                 language="ro",
-                beam_size=5,
-                vad_filter=True
+                beam_size=5
             )
+
             user_text = "".join([s.text for s in segments]).strip()
+            if not user_text:
+                continue
 
-            if user_text:
-                print(f"\r👤 Visi: {user_text}          ")
+            print(f"👤 Client: {user_text}")
 
-                chat_history.append({'role': 'user', 'content': user_text})
+            chat_history.append({'role': 'user', 'content': user_text})
+            response = ollama.chat(model=LLM_MODEL, messages=chat_history)
+            ai_response = response['message']['content']
 
-                response = ollama.chat(model=LLM_MODEL, messages=chat_history)
-                ai_response = response['message']['content']
+            # Detect booking JSON
+            if "{" in ai_response and "action" in ai_response:
+                try:
+                    start = ai_response.find("{")
+                    end = ai_response.rfind("}") + 1
+                    json_str = ai_response[start:end]
+                    data = json.loads(json_str)
 
-                chat_history.append({'role': 'assistant', 'content': ai_response})
+                    if data.get("action") == "book":
+                        succes = create_appointment(
+                            f"Programare: {data['nume']}",
+                            data['data']
+                        )
 
-                speak(ai_response)
-            else:
-                # Nimic detectat, ștergem linia
-                print("\r" + " " * 30 + "\r", end="", flush=True)
+                        if succes:
+                            ai_response = f"Gata {data['nume']}, programarea a fost înregistrată."
+                        else:
+                            ai_response = "Nu pot accesa calendarul momentan."
+
+                except:
+                    ai_response = "Nu am înțeles data. Poți repeta?"
+
+            chat_history.append({'role': 'assistant', 'content': ai_response})
+            speak(ai_response)
 
         except KeyboardInterrupt:
-            print("\n✅ La revedere, Visi!")
+            print("\n✅ La revedere!")
             break
         except Exception as e:
-            print(f"\n❌ Eroare neașteptată: {e}")
-            print("🔄 Reîncep ascultarea...\n")
+            print(f"\nEroare: {e}")
+            print("Reîncep...\n")
 
 if __name__ == "__main__":
     main()
