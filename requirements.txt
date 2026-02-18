@@ -1,11 +1,29 @@
+# Nucleu API
+fastapi
+uvicorn
+python-multipart
+
+# Procesare Audio & VAD
 numpy<2.0.0
 scipy
 sounddevice
+soundfile
+webrtcvad-wheels
+
+# Inteligență Artificială (STT, LLM, TTS)
 faster-whisper
+ollama
+edge-tts
+piper-tts
+setuptools
+
+# Google Calendar Integration
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+requests
+
+# NVIDIA GPU Support (Pentru RunPod)
 nvidia-cublas-cu12
 nvidia-cudnn-cu12
 nvidia-curand-cu12
-ollama
-piper-tts
-webrtcvad-wheels
-setuptools
