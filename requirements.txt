@@ -1,0 +1,8 @@
+numpy<2.0.0
+scipy
+sounddevice
+faster-whisper
+nvidia-cublas-cu12
+nvidia-cudnn-cu12
+nvidia-curand-cu12
+ollama
