@@ -3,10 +3,19 @@ import sounddevice as sd
 import numpy as np
 from faster_whisper import WhisperModel
 import ollama
-import tempfile
 import wave
 import subprocess
+import json
+import datetime
 from piper import PiperVoice
+
+# === IMPORTĂM FUNCȚIA DE CALENDAR ===
+# Asigură-te că fișierul calendar_tool.py este în același folder!
+try:
+    from calendar_tool import create_appointment
+except ImportError:
+    print("⚠️ ATENȚIE: Nu am găsit calendar_tool.py! Funcția de calendar nu va merge.")
+    def create_appointment(s, d): return False
 
 # === CONFIGURARE NVIDIA ===
 def setup_nvidia_libs():
@@ -22,80 +31,89 @@ def setup_nvidia_libs():
 setup_nvidia_libs()
 
 # === SETĂRI ===
-SAMPLE_RATE = 16000          # pentru Whisper STT
-PIPER_SAMPLE_RATE = 22050    # pentru Piper TTS (schimbă la 16000 dacă modelul tău e 16k)
-DURATION = 5                 # secunde înregistrare
-WHISPER_MODEL = "large-v3"
+SAMPLE_RATE = 16000          
+DURATION = 10                 
+WHISPER_MODEL = "small"
 LLM_MODEL = "llama3.2"
 PIPER_MODEL = "ro_RO-mihai-medium.onnx"
+OUTPUT_FILENAME = "raspuns_visi.wav"
 
-print("⌛ Încărcare modele pe RTX 2060 Super...")
-stt_model = WhisperModel(WHISPER_MODEL, device="cuda", compute_type="float16")
+print("⌛ Încărcare modele (Whisper + Piper)...")
+stt_model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
 voice = PiperVoice.load(PIPER_MODEL)
 
-print([m for m in dir(voice) if not m.startswith('_')])
+# === CONFIGURARE PROMPT AGENT ===
+# Calculăm data și ora curentă pentru ca Visi să știe ce zi e azi
+now = datetime.datetime.now()
+today_str = now.strftime("%Y-%m-%d %H:%M") # Format: 2023-10-27 14:30
+day_name = now.strftime("%A")
 
-# Prompt personalizat pentru Visi
 chat_history = [
-    {'role': 'system', 'content': 'Ești un asistent vocal prietenos. Utilizatorul se numește Visi. Răspunde scurt în română.'}
+    {
+        'role': 'system', 
+        'content': (
+            f'Ești Visi, recepționer virtual la un salon. Azi suntem în data de {today_str} ({day_name}). '
+            'REGULI: '
+            '1. Vorbește EXCLUSIV Română (cu diacritice). '
+            '2. Scopul tău este să faci o programare. Cere pe rând: Serviciul, Numele, Data și Ora. '
+            '3. IMPORTANT: Când ai TOATE detaliile și clientul confirmă, NU mai genera text obișnuit. '
+            'GENEREAZĂ DOAR ACEST JSON: '
+            '{"action": "book", "nume": "Nume Client", "data": "YYYY-MM-DDTHH:MM:00"} '
+            '4. Asigură-te că data din JSON este în formatul ISO corect (an-luna-ziTora:minut:00).'
+        )
+    }
 ]
 
 # === DETECTARE PLAYER AUDIO ===
 def get_audio_player():
-    """Detectează automat playerul audio disponibil."""
     for player in ["paplay", "aplay", "ffplay"]:
-        result = subprocess.run(["which", player], capture_output=True, text=True)
-        if result.returncode == 0:
+        if subprocess.run(["which", player], capture_output=True).returncode == 0:
             return player
     return None
 
 AUDIO_PLAYER = get_audio_player()
-if not AUDIO_PLAYER:
-    print("⚠️ Niciun player audio găsit! Instalează pulseaudio-utils: sudo apt install pulseaudio-utils")
 
-# === FUNCȚIE SINTEZĂ VOCALĂ ===
+# === FUNCȚIE SINTEZĂ VOCALĂ (FIXED) ===
 def speak(text):
-    output_file = None
     try:
         print(f"🤖 Agent: {text}")
-
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmpfile:
-            output_file = tmpfile.name
-
-        # Colectăm raw PCM bytes din generator
-        raw_audio = b"".join(voice.synthesize_stream_raw(text))
-
-        if not raw_audio:
-            print("⚠️ Piper nu a generat audio.")
+        
+        # Dacă textul e gol (poate a fost doar o comandă internă), nu zicem nimic
+        if not text:
             return
 
-        # Scriem manual WAV
-        with wave.open(output_file, "wb") as wf:
+        with wave.open(OUTPUT_FILENAME, "wb") as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)  # 16-bit
-            wf.setframerate(PIPER_SAMPLE_RATE)
-            wf.writeframes(raw_audio)
-
-        sd.stop()
-        subprocess.run([AUDIO_PLAYER, output_file], check=True)
+            wf.setframerate(voice.config.sample_rate)
+            
+            stream = voice.synthesize(text)
+            has_audio = False
+            
+            for chunk in stream:
+                # Fixul pentru audio_int16_bytes
+                if hasattr(chunk, 'audio_int16_bytes'):
+                    wf.writeframes(chunk.audio_int16_bytes)
+                    has_audio = True
+                elif hasattr(chunk, 'bytes'):
+                     wf.writeframes(chunk.bytes)
+                     has_audio = True
+            
+        if AUDIO_PLAYER and has_audio:
+            subprocess.run([AUDIO_PLAYER, OUTPUT_FILENAME], check=True)
 
     except Exception as e:
-        print(f"❌ Eroare: {e}")
-    finally:
-        if output_file and os.path.exists(output_file):
-            os.unlink(output_file)
+        print(f"❌ Eroare TTS: {e}")
 
 # === FUNCȚIE PRINCIPALĂ ===
 def main():
-    print(f"\n🚀 AGENT ACTIV | Salut, Visi!")
-    print(f"🔊 Player audio: {AUDIO_PLAYER}")
+    print(f"\n🚀 AGENT ACTIV | Data: {today_str}")
     print("🎤 Te ascult... (Ctrl+C pentru oprire)\n")
 
     while True:
         try:
             print("[Ascult...]", end="", flush=True)
 
-            # Înregistrare voce
             recording = sd.rec(
                 int(DURATION * SAMPLE_RATE),
                 samplerate=SAMPLE_RATE,
@@ -106,7 +124,6 @@ def main():
 
             print("\r[Procesez...]", end="", flush=True)
 
-            # Conversie pentru Whisper (float32 normalizat)
             audio_data = recording.flatten().astype(np.float32) / 32768.0
 
             segments, _ = stt_model.transcribe(
@@ -118,25 +135,56 @@ def main():
             user_text = "".join([s.text for s in segments]).strip()
 
             if user_text:
-                print(f"\r👤 Visi: {user_text}          ")
+                print(f"\r👤 Client: {user_text}          ")
 
+                # 1. Adăugăm ce a zis userul în istoric
                 chat_history.append({'role': 'user', 'content': user_text})
 
+                # 2. Întrebăm LLM-ul
                 response = ollama.chat(model=LLM_MODEL, messages=chat_history)
                 ai_response = response['message']['content']
 
+                # 3. VERIFICĂM DACA AI-ul VREA SĂ FACĂ PROGRAMARE (JSON)
+                if "{" in ai_response and "action" in ai_response:
+                    try:
+                        # Extragem JSON-ul din răspuns (în caz că mai are text pe lângă)
+                        start = ai_response.find("{")
+                        end = ai_response.rfind("}") + 1
+                        json_str = ai_response[start:end]
+                        
+                        data = json.loads(json_str)
+                        
+                        if data.get("action") == "book":
+                            print(f"📅 DETECTAT: Programare pentru {data['nume']} la {data['data']}")
+                            
+                            # === APELĂM GOOGLE CALENDAR ===
+                            succes = create_appointment(f"Programare: {data['nume']}", data['data'])
+                            
+                            if succes:
+                                ai_response = f"Gata {data['nume']}, am notat programarea în calendar. O zi bună!"
+                                # Opțional: Resetăm istoria după programare reușită
+                                # chat_history = [chat_history[0]] 
+                            else:
+                                ai_response = "Am o problemă tehnică și nu pot accesa calendarul momentan."
+
+                    except Exception as e:
+                        print(f"❌ Eroare procesare comandă: {e}")
+                        ai_response = "Nu am înțeles exact data. Poți repeta, te rog?"
+
+                # 4. Salvăm răspunsul final în istoric
                 chat_history.append({'role': 'assistant', 'content': ai_response})
 
+                # 5. Vorbim
                 speak(ai_response)
+
             else:
-                # Nimic detectat, ștergem linia
                 print("\r" + " " * 30 + "\r", end="", flush=True)
 
         except KeyboardInterrupt:
-            print("\n✅ La revedere, Visi!")
+            print("\n✅ La revedere!")
             break
         except Exception as e:
-            print(f"\n❌ Eroare neașteptată: {e}")
+            print(f"\n❌ Eroare: {e}")
             print("🔄 Reîncep ascultarea...\n")
 
 if __name__ == "__main__":
