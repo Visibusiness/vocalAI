@@ -27,3 +27,7 @@ requests
 nvidia-cublas-cu12
 nvidia-cudnn-cu12
 nvidia-curand-cu12
+
+torch
+TTS
+sqlalchemy
