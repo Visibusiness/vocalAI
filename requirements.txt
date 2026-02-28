@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+python-multipart
+faster-whisper
+edge-tts
+torch
+numpy<2.0
+ollama
