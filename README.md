@@ -1,127 +1,144 @@
 # 🎙️ VocalAI – STT + LLM + TTS Server
 
-Acest proiect rulează un server vocal AI folosind:
+Server vocal AI construit cu:
 
-* 🎤 **Faster-Whisper** (STT)
-* 🧠 **Ollama + RoLlama3.1-8b (GGUF)** (LLM)
-* 🔊 **edge-tts** (TTS)
-* 🚀 **FastAPI** (HTTP API)
-
----
-
-# 📦 VARIANTA 1 – Rulare cu Docker (Recomandat pentru producție)
-
-## 🔧 Cerințe
-
-* Docker
-* NVIDIA GPU (opțional, dar recomandat)
-* NVIDIA Container Toolkit (pentru GPU)
+- 🎤 Faster-Whisper (Speech-to-Text)
+- 🧠 Ollama + RoLlama3.1-8b GGUF (LLM)
+- 🔊 edge-tts (Text-to-Speech)
+- 🚀 FastAPI (API HTTP)
 
 ---
 
-## 🚀 1. Build imaginea
+# ⚠️ IMPORTANT (RunPod & Port)
 
-```bash
+RunPod rămâne blocat în `Initializing` dacă aplicația NU ascultă pe portul expus.
+
+Serverul TREBUIE pornit pe:
+
+0.0.0.0
+
+NU pe:
+
+127.0.0.1
+
+FastAPI este pornit corect prin:
+
+uvicorn app.main:app --host 0.0.0.0 --port 8001
+
+---
+
+# 📦 VARIANTA 1 – Docker (recomandat)
+
+## Cerințe
+
+- Docker
+- GPU NVIDIA (opțional dar recomandat)
+- NVIDIA Container Toolkit (pentru GPU)
+
+---
+
+## 1️⃣ Build imagine
+
 docker build -t vocalai .
-```
 
 ---
 
-## 🚀 2. Rulează containerul
+## 2️⃣ Rulează containerul
 
-```bash
 docker run --gpus all \
   -v ollama_data:/root/.ollama \
   -p 8001:8001 \
   vocalai
-```
 
-### 🔹 Explicații:
+Ce fac opțiunile:
 
-* `--gpus all` → activează GPU
-* `-v ollama_data:/root/.ollama` → salvează modelul persistent
-* `-p 8001:8001` → expune serverul
+- --gpus all → activează GPU
+- -v ollama_data:/root/.ollama → persistă modelul (NU îl mai descarcă la fiecare restart)
+- -p 8001:8001 → expune serverul
 
 ---
 
-## 🌐 Acces server
+## 🌐 Acces API
 
-```
 http://localhost:8001/docs
-```
 
 ---
 
-# ☁️ VARIANTA 2 – Rulare direct în RunPod (Test Rapid)
+# ☁️ VARIANTA 2 – RunPod (test rapid)
 
-## 🔧 Cerințe
+## Cerințe
 
-* Pod cu GPU
-* HTTP Port expus (ex: 8010)
+- Pod cu GPU
+- HTTP Port expus (ex: 8001)
+- Recomandat: Volume Disk activat (pentru persistență model)
 
 ---
 
-## 🚀 1. Clone repo
+## 1️⃣ Clone repo
 
-```bash
 git clone <repo_url>
 cd vocalAI
-git checkout <docker_branch>
-```
 
 ---
 
-## 🚀 2. Instalează dependențe
+## 2️⃣ Instalare dependențe
 
-```bash
 apt update
 apt install -y python3-pip ffmpeg curl
 pip3 install -r requirements.txt
-```
 
 ---
 
-## 🚀 3. Rulează serverul
+## 3️⃣ Pornește serverul
 
-```bash
 chmod +x start.sh
 ./start.sh
-```
-
-Scriptul face automat:
-
-* ✔ Instalează Ollama dacă nu există
-* ✔ Pornește Ollama
-* ✔ Creează modelul `visi-ro` dacă nu există
-* ✔ Pornește FastAPI
 
 ---
 
-## 🌐 Acces server
+# 🔄 Ce face start.sh automat
 
-Din UI RunPod → HTTP Service → portul ales (ex: 8010)
+Scriptul:
 
-Exemplu:
+- ✔ Instalează Ollama (dacă nu există)
+- ✔ Pornește Ollama
+- ✔ Creează modelul `visi-ro` din `Modelfile`
+- ✔ Pornește FastAPI pe `0.0.0.0`
 
-```
-https://xxxxx-8010.proxy.runpod.net/docs
-```
+Am adăugat în script:
+
+ollama create visi-ro -f Modelfile
+
+Asta înseamnă că identitatea modelului (System Prompt-ul) este aplicată automat la fiecare Pod nou.
+Nu mai trebuie făcut nimic manual.
 
 ---
 
-# 🎤 Endpoint
+# 🧠 REPARAȚIE MODELFILE (IMPORTANT)
 
-```
-POST /voice
-```
+Versiunea veche avea template de tip „Safety Assessment” (Llama-Guard).
 
-Trimite fișier `.wav` și primești răspuns `.mp3`.
+Problema:
+Modelul răspundea cu:
+safe
+unsafe
+
+în loc să vorbească normal.
+
+Am rescris TEMPLATE-ul în `Modelfile` folosind format standard Chat:
+
+- system
+- user
+- assistant
+
+Am adăugat și STOP TOKENS pentru Llama 3.1.
+
+Acum modelul răspunde normal, ca recepționeră.
 
 ---
 
 # 📁 Structura proiectului
 
-```
 vocalAI/
 │
 ├── app/
@@ -132,54 +149,73 @@ vocalAI/
 ├── Modelfile
 ├── start.sh
 └── .dockerignore
-```
+
+IMPORTANT:
+
+main.py este în folderul app/.
+
+De aceea comanda corectă este:
+
+uvicorn app.main:app
+
+NU:
+
+uvicorn main:app
 
 ---
 
-# ⚙️ Model utilizat
+# 💾 Persistență model (foarte important)
 
-```
+Modelul are ~5GB.
+
+Fără volum persistent:
+→ se descarcă la fiecare restart.
+
+Docker:
+-v ollama_data:/root/.ollama
+
+RunPod:
+Activează Volume Disk.
+
+---
+
+# ⚙️ Model folosit
+
 mradermacher/RoLlama3.1-8b-Instruct-DPO-GGUF
-Quant: Q4_K_M
-```
-
-Modelul este descărcat automat de Ollama la prima rulare.
+Quantizare: Q4_K_M
 
 ---
 
-# 🧠 Note importante
+# 🖥️ Optimizare GPU
 
-* Prima pornire va descărca modelul (~5GB).
-* Folosiți Volume Disk în RunPod pentru persistență.
-* Serverul trebuie rulat pe `0.0.0.0`.
+Testat pe RTX 2000 Ada:
+
+- Model Q4_K_M ocupă ~5GB VRAM
+- Încap și Whisper + modelul LLM simultan
+- Rulează fără probleme
 
 ---
 
-# 🔥 Debug rapid
+# 🎤 Endpoint principal
+
+POST /voice
+
+Trimite fișier .wav
+Primești răspuns .mp3
+
+---
+
+# 🔍 Debug rapid
 
 Verificare GPU:
-
-```bash
 nvidia-smi
-```
 
-Verificare model Ollama:
-
-```bash
+Verificare modele Ollama:
 ollama list
-```
 
 ---
 
-# 🏁 Status
+# 🏁 Server pornit corect când vezi:
 
-Server ready când vezi:
-
-```
 Application startup complete.
-Uvicorn running on http://0.0.0.0:XXXX
-```
-
----
-
-Made with ❤️ for rapid AI prototyping.
+Uvicorn running on http://0.0.0.0:8001
