@@ -39,4 +39,4 @@ if ! ollama list | grep -q "visi-ro"; then
 fi
 
 echo "🔥 8. Totul e gata! Pornim FastAPI..."
-uvicorn app.main:app --host 0.0.0.0 --port 8001
+uvicorn app.main:app --host 0.0.0.0 --port 8000

@@ -1,4 +1,4 @@
-FROM hf.co/mradermacher/RoLlama3.1-8b-Instruct-DPO-GGUF:Q4_K_M
+FROM hf.co/mradermacher/RoLlama3.1-8b-Instruct-DPO-GGUF:Q8_0
 
 # Template-ul care forțează modelul să respecte rolurile de Chat (Llama 3 style)
 TEMPLATE """<|start_header_id|>system<|end_header_id|>
