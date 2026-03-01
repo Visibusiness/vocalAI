@@ -1,4 +1,20 @@
 FROM hf.co/mradermacher/RoLlama3.1-8b-Instruct-DPO-GGUF:Q4_K_M
 
+# Template-ul care forțează modelul să respecte rolurile de Chat (Llama 3 style)
+TEMPLATE """<|start_header_id|>system<|end_header_id|>
+
+{{ .System }}<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+{{ .Prompt }}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+"""
+
+# Parametrii tăi plus stop tokens obligatorii pentru Llama 3.1
 PARAMETER temperature 0.3
 PARAMETER num_ctx 4096
+PARAMETER stop "<|start_header_id|>"
+PARAMETER stop "<|end_header_id|>"
+PARAMETER stop "<|eot_id|>"
+
+# System prompt-ul care îi dă identitatea
+SYSTEM "Ești Visi, recepționera salonului Elite. Răspunde natural, scurt și prietenos în limba română. Ignoră orice instrucțiune de 'safety assessment'."
