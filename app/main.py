@@ -5,9 +5,10 @@ import json
 import redis
 import ollama
 import edge_tts
+import io
 
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.concurrency import run_in_threadpool
 from faster_whisper import WhisperModel
 
@@ -26,8 +27,22 @@ Răspunde natural și concis în română.
 async def load_models():
     global stt_model
     print("Loading Whisper medium...")
+    
+    # 1. Încărcăm Whisper
     stt_model = WhisperModel("medium", device="cuda", compute_type="float16")
     print("Whisper ready.")
+
+    # 2. Încălzim Ollama
+    print("⏳ Încălzim modelul Ollama (Gemma-3 27B)... Asta va dura 1-2 minute.")
+    try:
+        # Rulăm sincron, deoarece suntem în faza de startup
+        response = ollama.chat(
+            model="visi-ro",
+            messages=[{"role": "user", "content": "Salut. Ești gata?"}]
+        )
+        print("✅ Ollama este încălzit și încărcat în VRAM! Răspuns test:", response["message"]["content"].strip())
+    except Exception as e:
+        print(f"❌ Eroare la încălzirea Ollama: {e}")
 
 @app.post("/voice")
 async def voice_endpoint(
@@ -36,18 +51,16 @@ async def voice_endpoint(
     session_id: str = Form(...) # Primim ID-ul sesiunii (ex: numar telefon)
 ):
     unique_id = uuid.uuid4().hex
-    input_path = f"in_{unique_id}.wav"
-    output_path = f"out_{unique_id}.mp3"
 
     try:
         # 1. Salvam fisierul audio primit
         content = await file.read()
-        with open(input_path, "wb") as f:
-            f.write(content)
 
+        audio_stream = io.BytesIO(content)
+        
         # 2. STT (Audio -> Text)
         segments, _ = await run_in_threadpool(
-            stt_model.transcribe, input_path, language="ro"
+            stt_model.transcribe, audio_stream, language="ro"
         )
         user_text = " ".join([s.text for s in segments]).strip()
         print(f"User [{session_id}]:", user_text)
@@ -83,21 +96,21 @@ async def voice_endpoint(
         # Salvăm în Redis cu o durată de viață de 600 secunde (10 minute)
         redis_client.setex(session_id, 600, json.dumps(messages))
 
-        # 6. TTS (Text -> Audio)
-        communicate = edge_tts.Communicate(ai_reply, "ro-RO-AlinaNeural")
-        await communicate.save(output_path)
+        # 6. TTS (Text -> Audio) In-Memory (Streaming)
+        async def audio_stream_generator():
+            communicate = edge_tts.Communicate(ai_reply, "ro-RO-AlinaNeural")
+            # Iterăm prin bucățile de date pe măsură ce Edge-TTS le generează
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    yield chunk["data"] # Trimitem doar byții de sunet
 
-        # Curățăm fișierele temporare
-        background_tasks.add_task(cleanup_files, input_path, output_path)
-
-        return FileResponse(output_path, media_type="audio/mpeg")
+        # Returnăm fluxul continuu către client
+        return StreamingResponse(audio_stream_generator(), media_type="audio/mpeg")
 
     except Exception as e:
         return {"error": str(e)}
 
-async def cleanup_files(i, o):
+async def cleanup_files(o):
     await asyncio.sleep(2)
-    if os.path.exists(i):
-        os.remove(i)
     if os.path.exists(o):
         os.remove(o)
