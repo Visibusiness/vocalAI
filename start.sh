@@ -6,6 +6,7 @@ set -e
 echo "🔄 1. Actualizăm sistemul (apt update & upgrade)..."
 apt-get update -y
 apt-get upgrade -y
+apt-get install zstd
 
 echo "📦 2. Instalăm pachetele de sistem necesare..."
 # Ne asigurăm că avem Redis, curl și ffmpeg (pentru Whisper/audio)
