@@ -1,150 +1,138 @@
-import os
-import uuid
-import asyncio
-import json
-import redis
-import ollama
-import edge_tts
-import io
-
-from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks
-from fastapi.responses import FileResponse, StreamingResponse
+import os, uuid, ollama, asyncio, datetime, torch, edge_tts, json
+from fastapi import FastAPI, UploadFile, File, BackgroundTasks
+from fastapi.responses import FileResponse
 from fastapi.concurrency import run_in_threadpool
 from faster_whisper import WhisperModel
 
-from datetime import datetime, timedelta
-from app.database import SessionLocal, CallLog, init_db
+# FIX PYTORCH
+_original_load = torch.load
+torch.load = lambda *args, **kwargs: _original_load(*args, **{**kwargs, "weights_only": False})
 
 app = FastAPI()
-stt_model = None
 
-# --- CONECTARE REDIS ---
-redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+# --- DATABASE & MEMORY ---
+DB_PATH = "clinica_db.json"
+# Memoria sesiunii: reține medicul, specializarea, data și ora
+STATE = {"medic": None, "specializare": None, "data": None, "ora": None, "pacient": None}
 
-SYSTEM_PROMPT = """
-Ești Visi, recepționera salonului Elite.
-Răspunde natural și concis în română.
-"""
+def load_db():
+    if not os.path.exists(DB_PATH):
+        # Default mock data if file is missing
+        data = {
+            "Dr. Ionescu": {"specializare": "Cardiologie", "program": []},
+            "Dr. Popescu": {"specializare": "Dermatologie", "program": []}
+        }
+        with open(DB_PATH, "w") as f: json.dump(data, f)
+    with open(DB_PATH, "r") as f: return json.load(f)
 
-def save_convo_to_db(session_id: str, messages_json: str):
-    db = SessionLocal()
-    try:
-        # Secretul aici: Căutăm o conversație pentru acest număr care 
-        # a fost actualizată în ultimele 15 minute.
-        fifteen_mins_ago = datetime.utcnow() - timedelta(minutes=5)
-        
-        log = db.query(CallLog).filter(
-            CallLog.session_id == session_id,
-            CallLog.updated_at >= fifteen_mins_ago
-        ).order_by(CallLog.id.desc()).first()
+def save_db(db):
+    with open(DB_PATH, "w") as f: json.dump(db, f, indent=4)
 
-        if log:
-            # Apelul este încă activ! Actualizăm jurnalul cu noile mesaje.
-            log.messages = messages_json
-        else:
-            # Este un apel nou. Creăm un rând nou în tabel.
-            new_log = CallLog(
-                session_id=session_id,
-                messages=messages_json
-            )
-            db.add(new_log)
-            
-        db.commit()
-    except Exception as e:
-        print(f"❌ Eroare la salvarea în baza de date: {e}")
-    finally:
-        db.close()
-
-@app.on_event("startup")
-async def load_models():
-    global stt_model
-    print("Loading Whisper medium...")
+# --- LOGICA MEDICALĂ ---
+def process_medical_logic(extracted):
+    global STATE
+    db = load_db()
     
-    # 1. Încărcăm Whisper
-    stt_model = WhisperModel("medium", device="cuda", compute_type="float16")
-    print("Whisper ready.")
+    # Actualizăm STATE cu ce am extras nou
+    if extracted.get("nume_medic"): STATE["medic"] = extracted["nume_medic"]
+    if extracted.get("specializare"): STATE["specializare"] = extracted["specializare"]
+    if extracted.get("data"): STATE["data"] = extracted["data"]
+    if extracted.get("ora"): STATE["ora"] = extracted["ora"]
+    if extracted.get("nume_pacient"): STATE["pacient"] = extracted["nume_pacient"]
 
-    # 2. Încălzim Ollama
-    print("⏳ Încălzim modelul Ollama (Gemma-3 27B)... Asta va dura 1-2 minute.")
-    try:
-        # Rulăm sincron, deoarece suntem în faza de startup
-        response = ollama.chat(
-            model="visi-ro",
-            messages=[{"role": "user", "content": "Salut. Ești gata?"}]
-        )
-        print("✅ Ollama este încălzit și încărcat în VRAM! Răspuns test:", response["message"]["content"].strip())
-    except Exception as e:
-        print(f"❌ Eroare la încălzirea Ollama: {e}")
+    # 1. Identificăm medicul dacă s-a dat doar specializarea
+    if STATE["specializare"] and not STATE["medic"]:
+        for nume, info in db.items():
+            if STATE["specializare"].lower() in info["specializare"].lower():
+                STATE["medic"] = nume
+                break
 
-    init_db()
-    print("🗄️ Baza de date SQLite a fost inițializată (salon.db).")
+    # 2. Verificăm ce lipsește
+    missing = []
+    if not STATE["medic"]: missing.append("specializarea sau numele medicului")
+    if not STATE["data"]: missing.append("data (ziua)")
+    if not STATE["ora"]: missing.append("ora")
+    if not STATE["pacient"]: missing.append("numele dumneavoastră")
+
+    if missing:
+        return f"SISTEM: Avem nevoie de {', '.join(missing)}."
+
+    # 3. Verificăm disponibilitatea (Data + Ora)
+    programare_cheie = f"{STATE['data']} {STATE['ora']}"
+    if programare_cheie in db[STATE["medic"]]["program"]:
+        return f"SISTEM: Dr. {STATE['medic']} este ocupat pe {STATE['data']} la ora {STATE['ora']}. Alegeți alt moment."
+
+    # 4. SALVARE (BOOK)
+    db[STATE["medic"]]["program"].append(programare_cheie)
+    save_db(db)
+    res = f"SUCCES: Programare confirmată: Pacient {STATE['pacient']}, la {STATE['medic']} ({db[STATE['medic']]['specializare']}), pe data de {STATE['data']} la ora {STATE['ora']}."
+    
+    # Resetăm pentru următorul pacient
+    STATE = {"medic": None, "specializare": None, "data": None, "ora": None, "pacient": None}
+    return res
+
+# --- AI MODELS ---
+stt_model = None
+@app.on_event("startup")
+async def startup():
+    global stt_model
+    stt_model = WhisperModel("large-v3", device="cuda", compute_type="float16")
+
+async def extract_medical_data(text):
+    acum = datetime.datetime.now().strftime("%d-%m-%Y %H:%M")
+    prompt = f"""Ești asistent medical. Azi e {acum}.
+Analizează cererea: "{text}"
+Extrage STRICT JSON:
+{{
+  "nume_pacient": string | null,
+  "nume_medic": string | null,
+  "specializare": "Cardiologie" | "Dermatologie" | "Pediatrie" | null,
+  "data": "DD-MM" | null,
+  "ora": "HH:MM" | null
+}}"""
+    res = await run_in_threadpool(ollama.chat, model="qwen2.5:1.5b-instruct", 
+                                  messages=[{"role":"user","content":prompt}], 
+                                  format="json", options={"temperature":0})
+    return json.loads(res["message"]["content"])
+
+def get_system_prompt(info):
+    return f"""Ești Visi, recepționera Clinicii Elite. 
+INFO SISTEM: {info}
+REGULI:
+1. Dacă sistemul cere date, întreabă politicos pacientul.
+2. NU inventa medici sau ore. 
+3. Dacă programarea e gata (SUCCES), confirmă toate detaliile clar.
+4. Răspunde scurt și profesionist."""
 
 @app.post("/voice")
-async def voice_endpoint(
-    background_tasks: BackgroundTasks, 
-    file: UploadFile = File(...),
-    session_id: str = Form(...) # Primim ID-ul sesiunii (ex: numar telefon)
-):
-    unique_id = uuid.uuid4().hex
-
+async def voice_endpoint(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+    uid = uuid.uuid4().hex
+    in_p, out_p = f"in_{uid}.wav", f"out_{uid}.mp3"
+    with open(in_p, "wb") as f: f.write(await file.read())
+    
     try:
-        # 1. Salvam fisierul audio primit
-        content = await file.read()
-
-        audio_stream = io.BytesIO(content)
-        
-        # 2. STT (Audio -> Text)
-        segments, _ = await run_in_threadpool(
-            stt_model.transcribe, audio_stream, language="ro"
-        )
+        # STT
+        segments, _ = await run_in_threadpool(stt_model.transcribe, in_p, language="ro")
         user_text = " ".join([s.text for s in segments]).strip()
-        print(f"User [{session_id}]:", user_text)
-
-        # --- 3. MEMORIA: Recuperăm istoricul din Redis ---
-        history_json = redis_client.get(session_id)
         
-        if history_json:
-            # Daca exista, il transformam din text inapoi in lista de Python
-            messages = json.loads(history_json)
-        else:
-            # Daca nu, incepem o conversatie noua doar cu promptul
-            messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-
-        # Adăugăm ce a spus clientul ACUM
-        messages.append({"role": "user", "content": user_text})
-
-        # 4. LLM (Trimitem tot istoricul către Ollama)
-        response = await run_in_threadpool(
-            ollama.chat,
-            model="visi-ro",
-            messages=messages, 
-            options={"temperature": 0.3}
-        )
-
-        ai_reply = response["message"]["content"].strip()
-        print(f"AI [{session_id}]:", ai_reply)
-
-        # --- 5. MEMORIA: Salvăm istoricul actualizat în Redis ---
-        # Adăugăm răspunsul lui Visi
-        messages.append({"role": "assistant", "content": ai_reply})
-
-        messages_json = json.dumps(messages)
+        # LOGICĂ
+        extracted = await extract_medical_data(user_text)
+        info_sistem = process_medical_logic(extracted)
         
-        # Salvăm în Redis cu o durată de viață de 600 secunde (10 minute)
-        redis_client.setex(session_id, 600, messages_json)
-
-        background_tasks.add_task(save_convo_to_db, session_id, messages_json)
-
-        # 6. TTS (Text -> Audio) In-Memory (Streaming)
-        async def audio_stream_generator():
-            communicate = edge_tts.Communicate(ai_reply, "ro-RO-AlinaNeural")
-            # Iterăm prin bucățile de date pe măsură ce Edge-TTS le generează
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    yield chunk["data"] # Trimitem doar byții de sunet
-
-        # Returnăm fluxul continuu către client
-        return StreamingResponse(audio_stream_generator(), media_type="audio/mpeg")
-
+        # LLM
+        res = await run_in_threadpool(ollama.chat, model="visi-ro", 
+                                      messages=[{"role":"system", "content": get_system_prompt(info_sistem)}, 
+                                                {"role":"user", "content": user_text}],
+                                      options={"temperature": 0.1})
+        ai_reply = res["message"]["content"]
+        
+        # TTS
+        await edge_tts.Communicate(ai_reply, "ro-RO-AlinaNeural").save(out_p)
+        background_tasks.add_task(lambda: (os.remove(in_p), os.remove(out_p)) if os.path.exists(in_p) else None)
+        return FileResponse(out_p, media_type="audio/mpeg")
     except Exception as e:
         return {"error": str(e)}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
