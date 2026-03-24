@@ -3,6 +3,7 @@ import uuid
 import asyncio
 import json
 from urllib.parse import quote, unquote
+import torch  # must be imported before faster_whisper to init CUDA lib paths
 import redis
 import ollama
 import edge_tts
