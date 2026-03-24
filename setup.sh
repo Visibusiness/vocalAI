@@ -108,6 +108,9 @@ if [ -n "$NVIDIA_LIBS" ]; then
     echo "  CUDA lib paths: $NVIDIA_LIBS"
 fi
 
+# Empty CUDA_VISIBLE_DEVICES hides all GPUs — unset it so CUDA can see the GPU
+unset CUDA_VISIBLE_DEVICES
+
 echo "[6/6] Starting VocalAI server on port 8000..."
 echo ""
 echo "============================================"
