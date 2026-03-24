@@ -100,12 +100,30 @@ def send_and_play(wav_bytes: bytes, session_id: str) -> None:
         os.unlink(tmp_path)
 
 
+SESSION_FILE = os.path.join(os.path.dirname(__file__), ".session_id")
+
+
+def load_or_create_session(new: bool) -> str:
+    if new or not os.path.exists(SESSION_FILE):
+        session_id = uuid.uuid4().hex[:8]
+        with open(SESSION_FILE, "w") as f:
+            f.write(session_id)
+        return session_id
+    with open(SESSION_FILE) as f:
+        return f.read().strip()
+
+
 def main():
     parser = argparse.ArgumentParser(description="VocalAI voice client")
     parser.add_argument(
         "--session",
-        default=uuid.uuid4().hex[:8],
-        help="Session ID (default: random). Use the same ID to continue a conversation.",
+        default=None,
+        help="Session ID (default: reuse last session from .session_id file)",
+    )
+    parser.add_argument(
+        "--new",
+        action="store_true",
+        help="Start a brand new session (forget conversation history)",
     )
     parser.add_argument(
         "--duration",
@@ -115,14 +133,16 @@ def main():
     )
     args = parser.parse_args()
 
-    print(f"\nVocalAI Client  |  session={args.session}  |  server={SERVER_URL}")
+    session_id = args.session if args.session else load_or_create_session(args.new)
+
+    print(f"\nVocalAI Client  |  session={session_id}  |  server={SERVER_URL}")
     print("Press Ctrl+C to quit.\n")
 
     while True:
         try:
             input("Press Enter to record...")
             wav_bytes = record_audio(args.duration)
-            send_and_play(wav_bytes, args.session)
+            send_and_play(wav_bytes, session_id)
             print()
         except KeyboardInterrupt:
             print("\nGoodbye.")

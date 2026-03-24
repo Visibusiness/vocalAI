@@ -83,11 +83,13 @@ async def voice_endpoint(
 
         # recuperam istoricul din Redis
         history_json = redis_client.get(session_id)
-        
+
         if history_json:
             messages = json.loads(history_json)
+            print(f"[redis] Loaded {len(messages)} messages for session {session_id}", flush=True)
         else:
             messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            print(f"[redis] New session {session_id}", flush=True)
 
         # adaugam ce a spus clientul ACUM
         messages.append({"role": "user", "content": user_text})

@@ -1,5 +1,6 @@
 venv/
 .venv/
+.session_id
 *.mp3
 *.wav
 
