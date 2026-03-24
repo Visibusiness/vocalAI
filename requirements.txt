@@ -1,5 +1,6 @@
 numpy<2.0.0
-faster-whisper
+faster-whisper>=1.1.0
+ctranslate2>=4.0.0
 nvidia-cublas-cu12
 nvidia-cudnn-cu12
 nvidia-curand-cu12
