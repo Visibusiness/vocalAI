@@ -89,10 +89,24 @@ echo "  Ollama model ready."
 # -----------------------------------------------------------
 # 6. Start FastAPI server
 # -----------------------------------------------------------
-# Warm up the CUDA driver so Whisper doesn't hit "unknown error" on first init
-echo "  Warming up CUDA driver..."
-nvidia-smi > /dev/null 2>&1 || true
-sleep 2
+# Add nvidia pip package lib paths to LD_LIBRARY_PATH so ctranslate2 can find libcudart
+NVIDIA_LIBS=$(python3 -c "
+import os, sys
+base = os.path.join(sys.prefix, 'lib', 'python' + sys.version[:4], 'dist-packages', 'nvidia')
+if not os.path.isdir(base):
+    base = '/usr/local/lib/python3.11/dist-packages/nvidia'
+paths = []
+if os.path.isdir(base):
+    for pkg in os.listdir(base):
+        lib = os.path.join(base, pkg, 'lib')
+        if os.path.isdir(lib):
+            paths.append(lib)
+print(':'.join(paths))
+" 2>/dev/null)
+if [ -n "$NVIDIA_LIBS" ]; then
+    export LD_LIBRARY_PATH="$NVIDIA_LIBS:$LD_LIBRARY_PATH"
+    echo "  CUDA lib paths: $NVIDIA_LIBS"
+fi
 
 echo "[6/6] Starting VocalAI server on port 8000..."
 echo ""
