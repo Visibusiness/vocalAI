@@ -128,11 +128,62 @@ curl -X POST http://localhost:8000/voice \
 
 ---
 
+---
+
+## Session Summary — 2026-03-24 (client, memory, calendar fixes)
+
+### What was built
+
+- **`client.py` created** — local laptop client that records mic audio (6s default), sends to `/voice`, prints AI reply text in terminal, and plays back the MP3 response through speakers.
+  - Uses `sounddevice` for both recording and playback (pydub's `ffplay` backend had no audio output on Linux desktop)
+  - Session ID is persisted to `.session_id` file — survives restarts, memory continues across runs
+  - `--new` flag starts a fresh session; `--session <id>` overrides manually
+  - Requires: `pip install sounddevice soundfile httpx pydub` + `sudo apt install portaudio19-dev ffmpeg`
+  - Run from `.venv`: `source .venv/bin/activate && python3 client.py`
+
+- **`app/main.py` updated**:
+  - Returns AI reply text as URL-encoded `X-AI-Text` response header (Romanian characters can't go in headers as raw UTF-8)
+  - Added `flush=True` to all print statements (stdout was buffering on RunPod)
+  - Added Redis hit/miss debug logging per request: `[redis] Loaded N messages for session X`
+
+### Bugs fixed
+
+| Bug | Cause | Fix |
+|---|---|---|
+| No audio playback on laptop | pydub used `ffplay` which had no output device | Switched to `sounddevice` + pydub decode |
+| Romanian chars crashed header | HTTP headers are Latin-1 only | `urllib.parse.quote/unquote` on `X-AI-Text` |
+| Memory lost on client restart | Random session ID generated each run | Persist session ID to `.session_id` file |
+| Server logs not flushing | Python stdout buffering | Added `flush=True` to prints |
+| `os` not imported in client | Missing import | Fixed |
+
+### RunPod deployment
+
+- **SSH**: `ssh root@195.26.232.186 -p 25154 -i ~/.ssh/id_ed25519`
+- **SCP a file**: `scp -P 25154 -i ~/.ssh/id_ed25519 <local_file> root@195.26.232.186:/workspace/vocalAI/<path>`
+- **Proxy URL**: `https://gj4u6gqf1pn91j-8000.proxy.runpod.net/`
+- **Restart server**: `pkill -f uvicorn && cd /workspace/vocalAI && GOOGLE_CALENDAR_ID="calinanicolas91@gmail.com" uvicorn app.main:app --host 0.0.0.0 --port 8000`
+
+### Google Calendar status
+
+- `credentials.json` — copied to `/workspace/vocalAI/credentials.json` on RunPod ✅
+- `CALENDAR_ID` — hardcoded to `calinanicolas91@gmail.com` in `app/calendar_service.py` ✅
+- Appointment parsing — working correctly (JSON extracted, name/date/time parsed) ✅
+- Calendar event creation — **FAILING with 404 Not Found** ❌
+
+**Root cause of 404**: The Google Calendar has not been shared with the service account email.
+
+**Fix needed (one-time, in Google Calendar UI)**:
+1. Find service account email: `python3 -c "import json; d=json.load(open('/workspace/vocalAI/credentials.json')); print(d['client_email'])"`
+2. Open Google Calendar → 3 dots next to calendar → Settings and sharing → Share with specific people
+3. Add the service account email with **"Make changes to events"** permission
+4. Restart the server
+
+---
+
 ## Next Steps
 
-- [ ] **Set up Google credentials** — follow the checklist in `app/calendar_service.py` to create a service account, download `credentials.json`, and share the calendar with the service account email
-- [ ] **Set `CALENDAR_ID`** — export `GOOGLE_CALENDAR_ID` env var or edit the constant in `calendar_service.py`
-- [ ] **End-to-end test** — run the server manually and call `POST /voice` with a Romanian audio file that confirms an appointment; verify the event appears in Google Calendar
+- [ ] **Fix Google Calendar 404** — share calendar with service account email (see above — this is the only blocker)
+- [ ] **End-to-end test** — confirm a booking via voice and verify the event appears in Google Calendar
 - [ ] **LLM reliability testing** — check if Gemma-3 consistently outputs the JSON block in the right format; adjust the system prompt if needed
 - [ ] **Date parsing robustness** — users may say "mâine" or "vineri"; consider adding a date normalization step before passing to the calendar API
 - [ ] **Conflict checking** — before creating an event, query the calendar for existing events at that time slot and inform the patient if it's taken
