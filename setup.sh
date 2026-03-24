@@ -73,16 +73,12 @@ else
 fi
 
 # Pre-download Whisper model weights (avoids cold-start delay on first request)
-echo "  Pre-downloading Whisper medium model..."
+echo "  Pre-downloading Whisper medium model weights (CPU, weights-only)..."
 python3 - <<'PYEOF'
+# Download weights only — no GPU needed, avoids CUDA fork issues
 from faster_whisper import WhisperModel
-print("  Downloading Whisper 'medium' weights...")
-try:
-    WhisperModel("medium", device="cuda", compute_type="float16")
-except Exception:
-    # CUDA may not be fully initialized during bootstrap — download with CPU instead
-    WhisperModel("medium", device="cpu", compute_type="int8")
-print("  Whisper model ready.")
+WhisperModel("medium", device="cpu", compute_type="int8")
+print("  Whisper weights cached.")
 PYEOF
 
 # Pull the model directly

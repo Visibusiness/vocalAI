@@ -51,21 +51,14 @@ Important:
 - Răspunsul natural vine ÎNAINTE de blocul JSON.
 """
 
-@app.on_event("startup")
-async def load_models():
+def get_stt_model():
+    """Lazy-load Whisper on first use to avoid CUDA fork issues at startup."""
     global stt_model
-    print("Loading Whisper medium...", flush=True)
-    for attempt in range(1, 4):
-        try:
-            stt_model = WhisperModel("medium", device="cuda", compute_type="float16")
-            break
-        except RuntimeError as e:
-            if attempt < 3:
-                print(f"CUDA init failed (attempt {attempt}/3), retrying in 5s: {e}", flush=True)
-                await asyncio.sleep(5)
-            else:
-                raise
-    print("Whisper ready.", flush=True)
+    if stt_model is None:
+        print("Loading Whisper medium...", flush=True)
+        stt_model = WhisperModel("medium", device="cuda", compute_type="float16")
+        print("Whisper ready.", flush=True)
+    return stt_model
 
 @app.post("/voice")
 async def voice_endpoint(
@@ -85,7 +78,7 @@ async def voice_endpoint(
 
         # 2. STT (Audio -> Text)
         segments, _ = await run_in_threadpool(
-            stt_model.transcribe, input_path, language="ro"
+            get_stt_model().transcribe, input_path, language="ro"
         )
         user_text = " ".join([s.text for s in segments]).strip()
         print(f"User [{session_id}]:", user_text, flush=True)
