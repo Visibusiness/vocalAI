@@ -102,7 +102,7 @@ async def voice_endpoint(
             ollama.chat,
             model="hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M",
             messages=messages,
-            options={"temperature": 0.3}
+            options={"temperature": 0.3, "num_ctx": 8192}
         )
 
         ai_reply = response["message"]["content"].strip()
