@@ -52,13 +52,23 @@ Important:
 - Răspunsul natural vine ÎNAINTE de blocul JSON.
 """
 
-def get_stt_model():
-    """Lazy-load Whisper on first use to avoid CUDA fork issues at startup."""
+@app.on_event("startup")
+async def load_models():
     global stt_model
-    if stt_model is None:
-        print("Loading Whisper medium...", flush=True)
-        stt_model = WhisperModel("medium", device="cuda", compute_type="float16")
-        print("Whisper ready.", flush=True)
+    print("Loading Whisper medium...", flush=True)
+    stt_model = WhisperModel("medium", device="cuda", compute_type="float16")
+    print("Whisper ready.", flush=True)
+
+    print("Warming up Ollama (loading model into VRAM)...", flush=True)
+    await run_in_threadpool(
+        ollama.chat,
+        model="hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M",
+        messages=[{"role": "user", "content": "hi"}],
+        options={"temperature": 0, "num_ctx": 8192, "num_predict": 1},
+    )
+    print("Ollama ready.", flush=True)
+
+def get_stt_model():
     return stt_model
 
 @app.post("/voice")
