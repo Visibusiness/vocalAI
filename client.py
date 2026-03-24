@@ -27,7 +27,6 @@ import numpy as np
 import sounddevice as sd
 import soundfile as sf
 from pydub import AudioSegment
-from pydub.playback import play
 
 SERVER_URL = "https://gj4u6gqf1pn91j-8000.proxy.runpod.net/voice"
 
@@ -88,9 +87,15 @@ def send_and_play(wav_bytes: bytes, session_id: str) -> None:
         tmp_path = tmp.name
 
     try:
+        # Decode MP3 to raw PCM via pydub, then play with sounddevice
         audio_segment = AudioSegment.from_mp3(tmp_path)
+        samples = np.array(audio_segment.get_array_of_samples(), dtype=np.float32)
+        samples /= 2 ** (audio_segment.sample_width * 8 - 1)  # normalise to [-1, 1]
+        if audio_segment.channels == 2:
+            samples = samples.reshape((-1, 2))
         print("Playing response...")
-        play(audio_segment)
+        sd.play(samples, samplerate=audio_segment.frame_rate)
+        sd.wait()
     finally:
         os.unlink(tmp_path)
 
