@@ -20,7 +20,7 @@ echo ""
 # -----------------------------------------------------------
 echo "[1/6] Installing system packages..."
 apt-get update -y -q
-apt-get install -y -q curl git python3-pip python3-dev redis-server ffmpeg lsof
+apt-get install -y -q curl git python3-pip python3-dev redis-server ffmpeg lsof zstd
 
 # -----------------------------------------------------------
 # 2. Ollama
@@ -77,7 +77,11 @@ echo "  Pre-downloading Whisper medium model..."
 python3 - <<'PYEOF'
 from faster_whisper import WhisperModel
 print("  Downloading Whisper 'medium' weights...")
-WhisperModel("medium", device="cuda", compute_type="float16")
+try:
+    WhisperModel("medium", device="cuda", compute_type="float16")
+except Exception:
+    # CUDA may not be fully initialized during bootstrap — download with CPU instead
+    WhisperModel("medium", device="cpu", compute_type="int8")
 print("  Whisper model ready.")
 PYEOF
 
