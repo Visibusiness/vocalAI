@@ -1,0 +1,7 @@
+client.py
+venv/
+*.mp3
+*.wav
+
+# Google Calendar credentials — never commit the real file
+credentials.json

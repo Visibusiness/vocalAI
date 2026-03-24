@@ -5,4 +5,12 @@ faster-whisper
 nvidia-cublas-cu12
 nvidia-cudnn-cu12
 nvidia-curand-cu12
+edge-tts
+torch
 ollama
+redis
+python-multipart
+
+# Google Calendar integration
+google-api-python-client
+google-auth

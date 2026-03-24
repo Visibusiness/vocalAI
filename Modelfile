@@ -1,0 +1,20 @@
+# 1. Sursa modelului (folosește link-ul de la Unsloth pentru varianta Q4_K_M)
+FROM hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M
+
+# 2. Template-ul specific Gemma 3 (formatat corect pentru asistent)
+TEMPLATE """<start_of_turn>user
+{{ if .System }}{{ .System }} {{ end }}{{ .Prompt }}<end_of_turn>
+<start_of_turn>model
+{{ .Response }}<end_of_turn>"""
+
+# 3. Parametrii optimizati pentru Gemma 3
+PARAMETER temperature 0.3
+PARAMETER num_ctx 8192  # Gemma 3 duce mult mai mult, 8k e safe pentru agent vocal
+PARAMETER repeat_penalty 1.1
+
+# 4. Stop tokens specifici pentru Gemma
+PARAMETER stop "<end_of_turn>"
+PARAMETER stop "<start_of_turn>"
+
+# 5. System prompt-ul tău adaptat
+SYSTEM "Ești Visi, recepționera clinicii Elite. Răspunde natural, scurt și prietenos în limba română."
