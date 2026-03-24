@@ -2,6 +2,7 @@ import os
 import uuid
 import asyncio
 import json
+from urllib.parse import quote, unquote
 import redis
 import ollama
 import edge_tts
@@ -133,7 +134,7 @@ async def voice_endpoint(
         return FileResponse(
             output_path,
             media_type="audio/mpeg",
-            headers={"X-AI-Text": clean_text},
+            headers={"X-AI-Text": quote(clean_text)},
         )
 
     except Exception as e:

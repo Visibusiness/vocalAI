@@ -16,9 +16,11 @@ Usage:
 
 import argparse
 import io
+import os
 import tempfile
 import uuid
 import wave
+from urllib.parse import unquote
 
 import httpx
 import numpy as np
@@ -69,16 +71,28 @@ def send_and_play(wav_bytes: bytes, session_id: str) -> None:
         print(f"Server error {response.status_code}: {response.text}")
         return
 
+    content_type = response.headers.get("content-type", "")
+    if "audio" not in content_type:
+        print(f"Unexpected response (content-type: {content_type}):")
+        print(response.text[:500])
+        return
+
     # Print the AI text response
     ai_text = response.headers.get("x-ai-text", "")
     if ai_text:
-        print(f"AI: {ai_text}")
+        print(f"AI: {unquote(ai_text)}")
 
-    # Load MP3 from response bytes and play it
-    mp3_bytes = io.BytesIO(response.content)
-    audio_segment = AudioSegment.from_mp3(mp3_bytes)
-    print("Playing response...")
-    play(audio_segment)
+    # Save MP3 to a temp file (ffmpeg needs a seekable file, not a pipe)
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+        tmp.write(response.content)
+        tmp_path = tmp.name
+
+    try:
+        audio_segment = AudioSegment.from_mp3(tmp_path)
+        print("Playing response...")
+        play(audio_segment)
+    finally:
+        os.unlink(tmp_path)
 
 
 def main():
