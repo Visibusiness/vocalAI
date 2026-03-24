@@ -93,6 +93,11 @@ echo "  Ollama model ready."
 # -----------------------------------------------------------
 # 6. Start FastAPI server
 # -----------------------------------------------------------
+# Warm up the CUDA driver so Whisper doesn't hit "unknown error" on first init
+echo "  Warming up CUDA driver..."
+nvidia-smi > /dev/null 2>&1 || true
+sleep 2
+
 echo "[6/6] Starting VocalAI server on port 8000..."
 echo ""
 echo "============================================"

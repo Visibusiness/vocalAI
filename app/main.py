@@ -54,9 +54,18 @@ Important:
 @app.on_event("startup")
 async def load_models():
     global stt_model
-    print("Loading Whisper medium...")
-    stt_model = WhisperModel("medium", device="cuda", compute_type="float16")
-    print("Whisper ready.")
+    print("Loading Whisper medium...", flush=True)
+    for attempt in range(1, 4):
+        try:
+            stt_model = WhisperModel("medium", device="cuda", compute_type="float16")
+            break
+        except RuntimeError as e:
+            if attempt < 3:
+                print(f"CUDA init failed (attempt {attempt}/3), retrying in 5s: {e}", flush=True)
+                await asyncio.sleep(5)
+            else:
+                raise
+    print("Whisper ready.", flush=True)
 
 @app.post("/voice")
 async def voice_endpoint(
