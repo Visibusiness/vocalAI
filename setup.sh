@@ -20,7 +20,7 @@ echo ""
 # -----------------------------------------------------------
 echo "[1/6] Installing system packages..."
 apt-get update -y -q
-apt-get install -y -q curl git python3-pip python3-dev redis-server ffmpeg lsof zstd
+apt-get install -y -q curl git python3-pip python3-dev redis-server ffmpeg lsof zstd pciutils
 
 # -----------------------------------------------------------
 # 2. Ollama
