@@ -1,7 +1,8 @@
-client.py
 venv/
+.venv/
 *.mp3
 *.wav
 
-# Google Calendar credentials — never commit the real file
+# Google credentials — never commit real files
 credentials.json
+vocalai-*.json

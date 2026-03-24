@@ -78,7 +78,7 @@ async def voice_endpoint(
             stt_model.transcribe, input_path, language="ro"
         )
         user_text = " ".join([s.text for s in segments]).strip()
-        print(f"User [{session_id}]:", user_text)
+        print(f"User [{session_id}]:", user_text, flush=True)
 
         # recuperam istoricul din Redis
         history_json = redis_client.get(session_id)
@@ -100,7 +100,7 @@ async def voice_endpoint(
         )
 
         ai_reply = response["message"]["content"].strip()
-        print(f"AI [{session_id}]:", ai_reply)
+        print(f"AI [{session_id}]:", ai_reply, flush=True)
 
         # --- EXTRAGE PROGRAMAREA DIN RASPUNS (daca exista) ---
         clean_text, appointment = extract_appointment(ai_reply)
@@ -130,7 +130,11 @@ async def voice_endpoint(
 
         background_tasks.add_task(cleanup_files, input_path, output_path)
 
-        return FileResponse(output_path, media_type="audio/mpeg")
+        return FileResponse(
+            output_path,
+            media_type="audio/mpeg",
+            headers={"X-AI-Text": clean_text},
+        )
 
     except Exception as e:
         return {"error": str(e)}
