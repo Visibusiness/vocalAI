@@ -94,8 +94,8 @@ async def voice_endpoint(
         # LLM
         response = await run_in_threadpool(
             ollama.chat,
-            model="visi-ro",
-            messages=messages, 
+            model="hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M",
+            messages=messages,
             options={"temperature": 0.3}
         )
 

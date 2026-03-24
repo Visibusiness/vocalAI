@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 VocalAI is a voice-based conversational AI receptionist ("TestAi") for a clinic called TestClinic. It accepts a WAV audio file, transcribes it, passes it through an LLM, and returns an MP3 response. All conversation is in Romanian.
 
-**Pipeline:** WAV → Faster-Whisper (STT) → Redis (history) → Ollama/Gemma-3 (LLM) → Edge-TTS → MP3
+**Pipeline:** WAV → Faster-Whisper (STT) → Redis (history) → Ollama/Gemma-3-27B (LLM) → Edge-TTS → MP3
 
 ## Running the Server
 
@@ -22,14 +22,14 @@ docker run --gpus all -v ollama_data:/root/.ollama -p 8000:8000 vocalai
 ```bash
 redis-server --daemonize yes
 ollama serve &
-ollama create visi-ro -f Modelfile   # only needed once
+ollama pull hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M   # only needed once (~17 GB)
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 **Full bootstrap (RunPod / bare metal):**
 
 ```bash
-./start.sh
+./setup.sh
 ```
 
 ## Testing
@@ -60,25 +60,23 @@ curl -X POST http://localhost:8000/voice \
 - Blocking operations (Whisper transcription, Ollama chat) run via `run_in_threadpool` to avoid blocking the async event loop
 - Temp files (`in_<uuid>.wav`, `out_<uuid>.mp3`) are created per-request and deleted by a background task 2 seconds after the response is sent
 
-### `Modelfile` — Ollama model definition
+### LLM model
 
-- Pulls `gemma-3-27b-it-GGUF:Q4_K_M` from Hugging Face via Unsloth
-- Registers it as the `visi-ro` model in Ollama
-- Sets the system prompt, Gemma-3 chat template, stop tokens, and inference parameters (temperature 0.3, ctx 8192)
-- To change the persona or model, edit this file and re-run `ollama create visi-ro -f Modelfile`
+- Model: `hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M` pulled directly via Ollama (no alias)
+- Called directly by name in `app/main.py` with `temperature=0.3`
 
 ### Key runtime dependencies
 
 - **Redis** must be running on `localhost:6379` before the FastAPI app starts
-- **Ollama** must be running on `localhost:11434` with the `visi-ro` model created
+- **Ollama** must be running on `localhost:11434` with `hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M` pulled
 - **CUDA GPU** is required — Whisper loads with `device="cuda", compute_type="float16"`
 - **Edge-TTS** makes outbound HTTPS calls to Microsoft; requires internet access
 
 ## Changing the AI Persona or Voice
 
-- System prompt: defined both in `Modelfile` (Ollama-level) and `app/main.py` (`SYSTEM_PROMPT` constant, used as the first message in Redis history when a session is new)
+- System prompt: `SYSTEM_PROMPT` constant in `app/main.py` — injected as the first message in Redis history for new sessions
 - TTS voice: `"ro-RO-AlinaNeural"` in `app/main.py` — change to any Edge-TTS Romanian voice
-- LLM model: update `FROM` in `Modelfile` and re-create the Ollama model
+- LLM model: update the model name string in `app/main.py` and re-pull via `ollama pull <model>`
 
 ---
 
@@ -114,6 +112,19 @@ curl -X POST http://localhost:8000/voice \
 4. Detect when an appointment is confirmed and parse structured data from the LLM reply
 5. Create a Google Calendar event automatically (1 hour, `Europe/Bucharest` timezone)
 6. Return only the natural Romanian text as audio to the user (JSON never spoken)
+
+---
+
+## Session Summary — 2026-03-24 (bootstrap & cleanup)
+
+### Changes made
+
+- **`setup.sh` created** — single-command bootstrap for RunPod / bare-metal Linux. Installs system packages, Ollama, Python deps, pre-downloads Whisper `medium` weights, pulls the Gemma-3 model, and starts the FastAPI server.
+- **Modelfile removed** — no longer needed. Model is pulled directly via `ollama pull`; no custom alias.
+- **`app/main.py`** — model reference changed from `"visi-ro"` to `"hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M"`.
+- **`requirements.txt`** — removed `scipy` and `sounddevice` (only used in deleted scripts); added `fastapi` and `uvicorn[standard]` which were missing.
+- **`stt.py` deleted** — old standalone mic-based script (Piper TTS, webrtcvad); replaced entirely by the FastAPI server.
+- **`calendar_tool.py` deleted** — old OAuth-based calendar helper; replaced by `app/calendar_service.py` (service account).
 
 ---
 
