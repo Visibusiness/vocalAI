@@ -48,30 +48,30 @@ Cum să te comporți:
 
 Format JSON pentru programare (după ce pacientul confirmă):
 ```json
-{
+{{
   "action": "schedule",
   "name": "Numele Pacientului",
   "date": "YYYY-MM-DD",
   "time": "HH:MM"
-}
+}}
 ```
 
 Format JSON pentru anulare (după ce pacientul confirmă anularea):
 ```json
-{
+{{
   "action": "cancel",
   "date": "YYYY-MM-DD",
   "time": "HH:MM"
-}
+}}
 ```
 
 Format JSON pentru verificare (imediat ce ai data și ora, fără să mai aștepți confirmare):
 ```json
-{
+{{
   "action": "check",
   "date": "YYYY-MM-DD",
   "time": "HH:MM"
-}
+}}
 ```
 
 REGULI STRICTE — TREBUIE RESPECTATE ÎNTOTDEAUNA:
@@ -88,7 +88,7 @@ REGULI STRICTE — TREBUIE RESPECTATE ÎNTOTDEAUNA:
 Exemplu corect când pacientul întreabă dacă are o programare:
 "Verificăm imediat în sistem..."
 ```json
-{"action": "check", "date": "2026-03-25", "time": "15:00"}
+{{"action": "check", "date": "{today.year}-03-25", "time": "15:00"}}
 ```
 """
 
