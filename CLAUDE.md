@@ -219,8 +219,45 @@ That's it. Steps 1 and 2 never need to be repeated — only steps 3 and 4 when m
 ## Next Steps
 
 - [x] **Fix Google Calendar 404** — calendar shared with service account, booking confirmed working ✅
-- [ ] **LLM reliability testing** — check if Gemma-3 consistently outputs the JSON block in the right format; adjust the system prompt if needed
-- [ ] **Date parsing robustness** — users may say "mâine" or "vineri"; consider adding a date normalization step before passing to the calendar API
-- [ ] **Conflict checking** — before creating an event, query the calendar for existing events at that time slot and inform the patient if it's taken
-- [ ] **Confirmation SMS/email** — after booking, notify the patient via an external service (Twilio, SendGrid, etc.)
-- [ ] **Docker update** — add `GOOGLE_CALENDAR_ID` env var to the `docker run` command and ensure `credentials.json` is mounted into the container
+- [x] **Conflict checking** — checks for existing events before booking, informs patient if slot is taken ✅
+- [x] **Date parsing robustness** — system prompt enforces current year, handles "mâine"/"azi" etc. ✅
+- [x] **Phone number as session ID** — `--phone` arg on both clients; stored in calendar event description ✅
+- [x] **List appointments action** — patient can ask "ce programare am?" and system queries calendar by phone ✅
+- [x] **Confirmation gate fixed** — AI now asks confirmation in a separate turn before sending schedule/cancel JSON ✅
+- [ ] **Confirmation SMS/email** — after booking, notify the patient via Twilio/SendGrid
+- [ ] **Twilio integration** — replace manual `--phone` arg with real inbound call handler
+- [ ] **Docker update** — add `GOOGLE_CALENDAR_ID` env var and mount `credentials.json` into container
+- [ ] **LLM reliability** — stress-test edge cases (interruptions mid-booking, ambiguous confirmations)
+
+---
+
+## Session Summary — 2026-03-25 (bug fixes & list action)
+
+### Problems found during testing
+
+| Issue | Root cause | Fix |
+|---|---|---|
+| Appointment created before confirmation | AI sent JSON in same turn as confirmation question | System prompt: explicit rule to never send JSON in same turn as confirmation |
+| AI announced date deductions aloud | No rule against explaining reasoning | System prompt: "do not explain deductions, use them silently" |
+| "Este liber mâine la 10?" didn't trigger check | AI gave generic greeting instead | System prompt: clearer rule that date+time present → send check JSON immediately |
+| "Ce programare am?" not handled | No `list` action existed | Added `list` action end-to-end |
+| f-string ValueError on startup | JSON example blocks used bare `{}` in f-string | Escaped all literal braces as `{{}}` |
+| LLM used year 2024 instead of current | Weak year rule in system prompt | Hardened: "ALWAYS use {today.year}, NEVER another year" |
+
+### New files / changes
+
+| File | What changed |
+|---|---|
+| `app/calendar_service.py` | Added `list_appointments(phone)` — queries future events by phone via Google Calendar `q` param |
+| `app/appointment_parser.py` | Added `"list"` action (only requires `action` key) |
+| `app/main.py` | Import `list_appointments`; handle `list` action; rewrote system prompt behavior rules |
+| `test_client.py` | New text-based test client (edge-tts → WAV → POST); `--phone` and `--text` args |
+| `client.py` | Added `--phone` arg (uses phone as session ID) |
+
+### How `list` works
+
+1. Patient says "ce programare am?" / "am vreo programare?"
+2. LLM emits `` ```json {"action": "list"} ``` ``
+3. Server calls `list_appointments(session_id)` — queries Google Calendar with `q=<phone>`
+4. Results injected back as system message → LLM replies naturally
+5. Clean text returned as audio

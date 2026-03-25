@@ -131,6 +131,36 @@ def cancel_appointment(date_str: str, time_str: str) -> bool:
     return True
 
 
+def list_appointments(phone: str) -> list[dict]:
+    """
+    Return all future appointments that contain the phone number in their description.
+
+    Args:
+        phone : patient phone number (used as search query)
+
+    Returns:
+        List of dicts with keys 'summary' and 'start' (ISO datetime string).
+    """
+    service = _get_service()
+    now = datetime.utcnow().isoformat() + "Z"
+    events_result = service.events().list(
+        calendarId=CALENDAR_ID,
+        timeMin=now,
+        q=phone,
+        singleEvents=True,
+        orderBy="startTime",
+        maxResults=10,
+    ).execute()
+
+    result = []
+    for e in events_result.get("items", []):
+        result.append({
+            "summary": e.get("summary", "Programare"),
+            "start": e.get("start", {}).get("dateTime", ""),
+        })
+    return result
+
+
 def create_appointment(name: str, date_str: str, time_str: str, phone: str = "") -> str:
     """
     Create a 1-hour appointment in Google Calendar.
