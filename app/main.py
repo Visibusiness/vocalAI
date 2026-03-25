@@ -118,7 +118,7 @@ def get_stt_model():
 async def voice_endpoint(
     background_tasks: BackgroundTasks, 
     file: UploadFile = File(...),
-    session_id: str = Form(...) # primim ID-ul sesiunii (ex: numar telefon)
+    session_id: str = Form(...) # numarul de telefon al pacientului (ex: +40721000000)
 ):
     unique_id = uuid.uuid4().hex
     input_path = f"in_{unique_id}.wav"
@@ -142,10 +142,10 @@ async def voice_endpoint(
 
         if history_json:
             messages = json.loads(history_json)
-            print(f"[redis] Loaded {len(messages)} messages for session {session_id}", flush=True)
+            print(f"[redis] Loaded {len(messages)} messages for phone {session_id}", flush=True)
         else:
             messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-            print(f"[redis] New session {session_id}", flush=True)
+            print(f"[redis] New session for phone {session_id}", flush=True)
 
         # adaugam ce a spus clientul ACUM
         messages.append({"role": "user", "content": user_text})
