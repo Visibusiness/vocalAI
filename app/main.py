@@ -31,8 +31,10 @@ Ești TestRec, recepționera clinicii TestClinic.
 Rolul tău principal este să ajuți pacienții să programeze, să anuleze sau să verifice consultații.
 
 Data de astăzi este: {today_str}. Anul curent este {today.year}.
-Dacă pacientul nu specifică anul, folosește {today.year} (sau {today.year + 1} dacă data menționată a trecut deja în {today.year}).
-NU întreba pacientul despre an dacă nu este necesar — deduce-l din context.
+REGULI STRICTE PENTRU AN:
+- Dacă pacientul nu specifică anul, folosește ÎNTOTDEAUNA {today.year}. NICIODATĂ alt an (ex: 2024, 2025).
+- NU întreba pacientul despre an în nicio situație. Deduce singur: dacă data a trecut deja în {today.year}, folosește {today.year + 1}.
+- NU programa sau verifica date din trecut. Dacă data este anterioară față de astăzi ({today_str}), informează pacientul că nu este posibil.
 
 Cum să te comporți:
 - Vorbește natural, politicos și prietenos în limba română.
@@ -229,6 +231,16 @@ async def voice_endpoint(
                             print(f"[main] Programare creata: {event_link}", flush=True)
 
                 elif action == "cancel":
+                    appt_date = dt.strptime(appointment["date"], "%Y-%m-%d").date()
+                    if appt_date < date_type.today():
+                        print(f"[main] Cancel ignorat — data in trecut: {appointment['date']}", flush=True)
+                        clean_text = f"Data de {appointment['date']} este în trecut. Nu există programări active pentru date trecute."
+                        messages.append({"role": "assistant", "content": clean_text})
+                        redis_client.setex(session_id, 600, json.dumps(messages))
+                        communicate = edge_tts.Communicate(clean_text, "ro-RO-AlinaNeural")
+                        await communicate.save(output_path)
+                        background_tasks.add_task(cleanup_files, input_path, output_path)
+                        return FileResponse(output_path, media_type="audio/mpeg", headers={"X-AI-Text": quote(clean_text)})
                     deleted = await run_in_threadpool(
                         cancel_appointment,
                         appointment["date"],
@@ -264,6 +276,16 @@ async def voice_endpoint(
                         print(f"[main] Programare anulata: {appointment['date']} {appointment['time']}", flush=True)
 
                 elif action == "check":
+                    appt_date = dt.strptime(appointment["date"], "%Y-%m-%d").date()
+                    if appt_date < date_type.today():
+                        print(f"[main] Check ignorat — data in trecut: {appointment['date']}", flush=True)
+                        clean_text = f"Data de {appointment['date']} este în trecut. Puteți verifica doar programări viitoare."
+                        messages.append({"role": "assistant", "content": clean_text})
+                        redis_client.setex(session_id, 600, json.dumps(messages))
+                        communicate = edge_tts.Communicate(clean_text, "ro-RO-AlinaNeural")
+                        await communicate.save(output_path)
+                        background_tasks.add_task(cleanup_files, input_path, output_path)
+                        return FileResponse(output_path, media_type="audio/mpeg", headers={"X-AI-Text": quote(clean_text)})
                     events = await run_in_threadpool(
                         get_appointments,
                         appointment["date"],
