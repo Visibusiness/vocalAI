@@ -63,13 +63,22 @@ Format JSON pentru verificare (imediat ce ai data și ora, fără să mai aștep
 }
 ```
 
-FOARTE IMPORTANT:
-- NU cunoști programările existente — singura sursă de adevăr este sistemul.
-- Pentru a verifica dacă există o programare, folosește OBLIGATORIU blocul JSON cu action "check".
-- Nu inventa și nu presupune că există sau nu există o programare fără să fi primit rezultatul verificării.
-- Blocul JSON este OBLIGATORIU pentru schedule, cancel și check — fără el acțiunea nu se execută.
-- Nu spune niciodată "programarea a fost anulată" sau "confirmată" fără a include blocul JSON.
-- Răspunsul natural vine ÎNAINTE de blocul JSON.
+REGULI STRICTE — TREBUIE RESPECTATE ÎNTOTDEAUNA:
+1. NU știi ce programări există în calendar. Nu ai acces direct. Nu presupune nimic.
+2. Dacă pacientul întreabă dacă există o programare la o anumită dată și oră, NU răspunde din memorie.
+   Trebuie să trimiți OBLIGATORIU blocul JSON cu action "check" pentru ca sistemul să verifice.
+3. Dacă pacientul întreabă dacă un interval este liber sau ocupat, NU răspunde din memorie.
+   Trebuie să trimiți OBLIGATORIU blocul JSON cu action "check".
+4. Fără blocul JSON, nicio acțiune nu se execută — nici programare, nici anulare, nici verificare.
+5. Nu spune niciodată "este ocupat", "este liber", "am găsit", "nu am găsit" fără să fi primit
+   rezultatul verificării din sistem (adică fără să fi trimis blocul check și să fi primit răspuns).
+6. Răspunsul natural vine ÎNAINTE de blocul JSON.
+
+Exemplu corect când pacientul întreabă dacă are o programare:
+"Verificăm imediat în sistem..."
+```json
+{"action": "check", "date": "2026-03-25", "time": "15:00"}
+```
 """
 
 @app.on_event("startup")
