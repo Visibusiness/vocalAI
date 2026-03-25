@@ -72,6 +72,31 @@ def check_conflict(date_str: str, time_str: str) -> bool:
     return len(events) > 0
 
 
+def get_appointments(date_str: str, time_str: str) -> list[str]:
+    """
+    Return a list of event summaries found at the given date/time slot.
+    Returns an empty list if nothing is found.
+    """
+    try:
+        start_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        return []
+
+    end_dt = start_dt + timedelta(hours=1)
+    time_min = start_dt.strftime("%Y-%m-%dT%H:%M:%S") + "+02:00"
+    time_max = end_dt.strftime("%Y-%m-%dT%H:%M:%S") + "+02:00"
+
+    service = _get_service()
+    events_result = service.events().list(
+        calendarId=CALENDAR_ID,
+        timeMin=time_min,
+        timeMax=time_max,
+        singleEvents=True,
+    ).execute()
+
+    return [e.get("summary", "Programare") for e in events_result.get("items", [])]
+
+
 def cancel_appointment(date_str: str, time_str: str) -> bool:
     """
     Delete the event at the given date/time slot.

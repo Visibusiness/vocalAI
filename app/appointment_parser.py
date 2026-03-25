@@ -17,6 +17,7 @@ _JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
 
 REQUIRED_KEYS_SCHEDULE = {"action", "name", "date", "time"}
 REQUIRED_KEYS_CANCEL = {"action", "date", "time"}
+REQUIRED_KEYS_CHECK = {"action", "date", "time"}
 
 
 def extract_appointment(ai_reply: str) -> tuple[str, dict | None]:
@@ -59,6 +60,12 @@ def extract_appointment(ai_reply: str) -> tuple[str, dict | None]:
         if not REQUIRED_KEYS_CANCEL.issubset(data.keys()):
             missing = REQUIRED_KEYS_CANCEL - data.keys()
             print(f"[appointment_parser] Missing keys for cancel: {missing}")
+            return clean_text, None
+
+    elif action == "check":
+        if not REQUIRED_KEYS_CHECK.issubset(data.keys()):
+            missing = REQUIRED_KEYS_CHECK - data.keys()
+            print(f"[appointment_parser] Missing keys for check: {missing}")
             return clean_text, None
 
     else:

@@ -14,7 +14,7 @@ from fastapi.concurrency import run_in_threadpool
 from faster_whisper import WhisperModel
 
 from app.appointment_parser import extract_appointment
-from app.calendar_service import create_appointment, check_conflict, cancel_appointment
+from app.calendar_service import create_appointment, check_conflict, cancel_appointment, get_appointments
 
 app = FastAPI()
 stt_model = None
@@ -24,22 +24,18 @@ redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=T
 
 SYSTEM_PROMPT = """
 Ești TestRec, recepționera clinicii TestClinic.
-Rolul tău principal este să ajuți pacienții să programeze sau să anuleze consultații.
+Rolul tău principal este să ajuți pacienții să programeze, să anuleze sau să verifice consultații.
 
 Cum să te comporți:
 - Vorbește natural, politicos și prietenos în limba română.
-- Pentru PROGRAMARE, colectează:
-    1. Numele complet al pacientului
-    2. Data dorită (zi, lună, an)
-    3. Ora dorită
-- Pentru ANULARE, colectează:
-    1. Data programării (zi, lună, an)
-    2. Ora programării
+- Pentru PROGRAMARE, colectează: numele complet, data (zi, lună, an), ora.
+- Pentru ANULARE, colectează: data programării (zi, lună, an), ora programării.
+- Pentru VERIFICARE, colectează: data (zi, lună, an), ora.
 - Dacă lipsește vreo informație, întreabă politicos.
-- Când ai toate informațiile și pacientul confirmă, răspunde natural
-  și adaugă UN SINGUR bloc JSON la sfârșitul mesajului, exact în formatele de mai jos.
+- Când ai toate informațiile necesare, răspunde natural și adaugă UN SINGUR bloc JSON,
+  exact în formatele de mai jos.
 
-Format JSON pentru programare (doar când pacientul confirmă):
+Format JSON pentru programare (după ce pacientul confirmă):
 ```json
 {
   "action": "schedule",
@@ -49,7 +45,7 @@ Format JSON pentru programare (doar când pacientul confirmă):
 }
 ```
 
-Format JSON pentru anulare (doar când pacientul confirmă anularea):
+Format JSON pentru anulare (după ce pacientul confirmă anularea):
 ```json
 {
   "action": "cancel",
@@ -58,12 +54,21 @@ Format JSON pentru anulare (doar când pacientul confirmă anularea):
 }
 ```
 
+Format JSON pentru verificare (imediat ce ai data și ora, fără să mai aștepți confirmare):
+```json
+{
+  "action": "check",
+  "date": "YYYY-MM-DD",
+  "time": "HH:MM"
+}
+```
+
 FOARTE IMPORTANT:
-- Blocul JSON este OBLIGATORIU când pacientul confirmă o programare sau o anulare.
-- Fără bloc JSON, acțiunea NU se execută în sistem — programarea nu se creează și nu se anulează.
-- Nu spune niciodată "programarea a fost anulată" sau "programarea a fost confirmată" fără a include blocul JSON.
-- Nu include blocul JSON dacă pacientul NU a confirmat încă.
-- Nu inventa informații — dacă nu știi data sau ora, întreabă.
+- NU cunoști programările existente — singura sursă de adevăr este sistemul.
+- Pentru a verifica dacă există o programare, folosește OBLIGATORIU blocul JSON cu action "check".
+- Nu inventa și nu presupune că există sau nu există o programare fără să fi primit rezultatul verificării.
+- Blocul JSON este OBLIGATORIU pentru schedule, cancel și check — fără el acțiunea nu se execută.
+- Nu spune niciodată "programarea a fost anulată" sau "confirmată" fără a include blocul JSON.
 - Răspunsul natural vine ÎNAINTE de blocul JSON.
 """
 
@@ -213,6 +218,45 @@ async def voice_endpoint(
                         print(f"AI [{session_id}] (cancel-not-found):", ai_reply, flush=True)
                     else:
                         print(f"[main] Programare anulata: {appointment['date']} {appointment['time']}", flush=True)
+
+                elif action == "check":
+                    events = await run_in_threadpool(
+                        get_appointments,
+                        appointment["date"],
+                        appointment["time"],
+                    )
+                    if events:
+                        result_msg = (
+                            f"Rezultat verificare din sistem: există o programare pe {appointment['date']} "
+                            f"la ora {appointment['time']}: {', '.join(events)}. "
+                            "Informează pacientul și întreabă dacă dorește să o anuleze sau dacă mai are alte întrebări. "
+                            "Nu include niciun bloc JSON în răspuns."
+                        )
+                    else:
+                        result_msg = (
+                            f"Rezultat verificare din sistem: nu există nicio programare pe {appointment['date']} "
+                            f"la ora {appointment['time']}. "
+                            "Informează pacientul și întreabă dacă dorește să programeze o consultație. "
+                            "Nu include niciun bloc JSON în răspuns."
+                        )
+                    print(f"[main] Check: {result_msg}", flush=True)
+                    messages.append({"role": "system", "content": result_msg})
+                    check_response = await run_in_threadpool(
+                        ollama.chat,
+                        model="hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M",
+                        messages=messages,
+                        options={"temperature": 0.3, "num_ctx": 8192},
+                    )
+                    ai_reply = check_response["message"]["content"].strip()
+                    if not ai_reply:
+                        ai_reply = (
+                            f"Am verificat în sistem. "
+                            + (f"Există o programare pe {appointment['date']} la ora {appointment['time']}."
+                               if events else
+                               f"Nu există nicio programare pe {appointment['date']} la ora {appointment['time']}.")
+                        )
+                    clean_text = ai_reply
+                    print(f"AI [{session_id}] (check):", ai_reply, flush=True)
 
             except Exception as e:
                 print(f"[main] Eroare la procesare programare: {e}", flush=True)
