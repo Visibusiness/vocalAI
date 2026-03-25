@@ -180,10 +180,45 @@ curl -X POST http://localhost:8000/voice \
 
 ---
 
+## Google Calendar Setup (new server / first time)
+
+The app uses a **Google Service Account** to write events to your calendar. Do this once per Google account — the calendar sharing persists permanently.
+
+### Step 1 — Create service account credentials (one-time)
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com) → your project
+2. Enable the **Google Calendar API** if not already enabled
+3. Go to **IAM & Admin → Service Accounts → Create Service Account**
+4. Give it any name, click through
+5. Go to **Keys → Add Key → Create new key → JSON** → download it
+
+### Step 2 — Share your calendar with the service account (one-time)
+
+1. Open the downloaded JSON and copy the `client_email` value (looks like `xxx@your-project.iam.gserviceaccount.com`)
+2. Open **Google Calendar** → 3 dots next to your calendar → **Settings and sharing** → **Share with specific people**
+3. Add the `client_email` with **"Make changes to events"** permission
+
+### Step 3 — Copy credentials to the server
+
+```bash
+scp -P <port> -i ~/.ssh/id_ed25519 ~/Downloads/your-key.json root@<server-ip>:/workspace/vocalAI/credentials.json
+```
+
+### Step 4 — Start the server with your calendar ID
+
+```bash
+pkill -f uvicorn
+cd /workspace/vocalAI
+GOOGLE_CALENDAR_ID="your-email@gmail.com" uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+That's it. Steps 1 and 2 never need to be repeated — only steps 3 and 4 when moving to a new server.
+
+---
+
 ## Next Steps
 
-- [ ] **Fix Google Calendar 404** — share calendar with service account email (see above — this is the only blocker)
-- [ ] **End-to-end test** — confirm a booking via voice and verify the event appears in Google Calendar
+- [x] **Fix Google Calendar 404** — calendar shared with service account, booking confirmed working ✅
 - [ ] **LLM reliability testing** — check if Gemma-3 consistently outputs the JSON block in the right format; adjust the system prompt if needed
 - [ ] **Date parsing robustness** — users may say "mâine" or "vineri"; consider adding a date normalization step before passing to the calendar API
 - [ ] **Conflict checking** — before creating an event, query the calendar for existing events at that time slot and inform the patient if it's taken
