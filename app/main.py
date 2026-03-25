@@ -146,6 +146,12 @@ async def voice_endpoint(
                         options={"temperature": 0.3, "num_ctx": 8192},
                     )
                     ai_reply = conflict_response["message"]["content"].strip()
+                    if not ai_reply:
+                        ai_reply = (
+                            f"Îmi pare rău, intervalul de la ora {appointment['time']} "
+                            f"din data de {appointment['date']} este deja ocupat. "
+                            "Doriți să alegeți o altă oră sau zi?"
+                        )
                     clean_text = ai_reply
                     print(f"AI [{session_id}] (conflict):", ai_reply, flush=True)
                 else:
