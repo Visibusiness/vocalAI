@@ -2,7 +2,7 @@ import os
 import uuid
 import asyncio
 import json
-from datetime import date as date_type, datetime as dt
+from datetime import date as date_type, datetime as dt, timedelta
 from urllib.parse import quote, unquote
 import torch  # must be imported before faster_whisper to init CUDA lib paths
 import redis
@@ -88,7 +88,7 @@ REGULI STRICTE — TREBUIE RESPECTATE ÎNTOTDEAUNA:
 Exemplu corect când pacientul întreabă dacă are o programare:
 "Verificăm imediat în sistem..."
 ```json
-{{"action": "check", "date": "{today.year}-03-25", "time": "15:00"}}
+{{"action": "check", "date": "{(today + timedelta(days=7)).strftime('%Y-%m-%d')}", "time": "15:00"}}
 ```
 """
 
