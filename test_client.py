@@ -105,12 +105,16 @@ def load_or_create_session(new: bool, override: str | None) -> str:
 def main():
     parser = argparse.ArgumentParser(description="VocalAI text-based test client")
     parser.add_argument("--text", required=True, help="Romanian text to send as patient input")
+    parser.add_argument("--phone", default=None, help="Patient phone number — used as session ID (e.g. +40721000000)")
     parser.add_argument("--session", default=None, help="Session ID (default: reuse last)")
     parser.add_argument("--new", action="store_true", help="Start a fresh session")
     parser.add_argument("--play", action="store_true", help="Also play the audio response")
     args = parser.parse_args()
 
-    session_id = load_or_create_session(args.new, args.session)
+    if args.phone:
+        session_id = args.phone
+    else:
+        session_id = load_or_create_session(args.new, args.session)
     print(f"session={session_id} | text=\"{args.text}\"")
 
     print("Synthesizing input audio...")
