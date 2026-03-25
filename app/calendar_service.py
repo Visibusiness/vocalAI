@@ -131,7 +131,7 @@ def cancel_appointment(date_str: str, time_str: str) -> bool:
     return True
 
 
-def create_appointment(name: str, date_str: str, time_str: str) -> str:
+def create_appointment(name: str, date_str: str, time_str: str, phone: str = "") -> str:
     """
     Create a 1-hour appointment in Google Calendar.
 
@@ -139,6 +139,7 @@ def create_appointment(name: str, date_str: str, time_str: str) -> str:
         name     : patient name (used in event title)
         date_str : date in "YYYY-MM-DD" format
         time_str : time in "HH:MM" format
+        phone    : patient phone number (stored in event description)
 
     Returns:
         The URL link to the created Google Calendar event.
@@ -155,13 +156,14 @@ def create_appointment(name: str, date_str: str, time_str: str) -> str:
 
     end_dt = start_dt + timedelta(hours=1)
 
-    # Format as RFC3339 with Romanian timezone (UTC+3 in summer, UTC+2 in winter)
-    # Using Europe/Bucharest timezone name for correctness
     timezone = "Europe/Bucharest"
+    description = f"Programare creată automat de TestRec pentru {name}."
+    if phone:
+        description += f"\nTelefon: {phone}"
 
     event = {
         "summary": f"Programare - {name}",
-        "description": f"Programare creată automat de TestRec pentru {name}.",
+        "description": description,
         "start": {
             "dateTime": start_dt.strftime("%Y-%m-%dT%H:%M:%S"),
             "timeZone": timezone,

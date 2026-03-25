@@ -228,6 +228,7 @@ async def voice_endpoint(
                                 appointment["name"],
                                 appointment["date"],
                                 appointment["time"],
+                                session_id,
                             )
                             print(f"[main] Programare creata: {event_link}", flush=True)
 
