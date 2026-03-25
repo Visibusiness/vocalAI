@@ -48,6 +48,11 @@ def extract_appointment(ai_reply: str) -> tuple[str, dict | None]:
         print(f"[appointment_parser] JSON decode error: {e}")
         return clean_text, None
 
+    # Reject any JSON that still has null values — AI sent it too early
+    if any(v is None for v in data.values()):
+        print(f"[appointment_parser] Rejected JSON with null values: {data}")
+        return clean_text, None
+
     action = data.get("action")
 
     if action == "schedule":
