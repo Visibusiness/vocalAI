@@ -58,8 +58,11 @@ Format JSON pentru anulare (doar când pacientul confirmă anularea):
 }
 ```
 
-Important:
-- Nu include blocul JSON decât dacă pacientul a confirmat explicit acțiunea.
+FOARTE IMPORTANT:
+- Blocul JSON este OBLIGATORIU când pacientul confirmă o programare sau o anulare.
+- Fără bloc JSON, acțiunea NU se execută în sistem — programarea nu se creează și nu se anulează.
+- Nu spune niciodată "programarea a fost anulată" sau "programarea a fost confirmată" fără a include blocul JSON.
+- Nu include blocul JSON dacă pacientul NU a confirmat încă.
 - Nu inventa informații — dacă nu știi data sau ora, întreabă.
 - Răspunsul natural vine ÎNAINTE de blocul JSON.
 """
