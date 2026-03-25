@@ -72,6 +72,40 @@ def check_conflict(date_str: str, time_str: str) -> bool:
     return len(events) > 0
 
 
+def cancel_appointment(date_str: str, time_str: str) -> bool:
+    """
+    Delete the event at the given date/time slot.
+
+    Returns True if an event was found and deleted, False if nothing was found.
+    """
+    try:
+        start_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        return False
+
+    end_dt = start_dt + timedelta(hours=1)
+    time_min = start_dt.strftime("%Y-%m-%dT%H:%M:%S") + "+02:00"
+    time_max = end_dt.strftime("%Y-%m-%dT%H:%M:%S") + "+02:00"
+
+    service = _get_service()
+    events_result = service.events().list(
+        calendarId=CALENDAR_ID,
+        timeMin=time_min,
+        timeMax=time_max,
+        singleEvents=True,
+    ).execute()
+
+    events = events_result.get("items", [])
+    if not events:
+        return False
+
+    for event in events:
+        service.events().delete(calendarId=CALENDAR_ID, eventId=event["id"]).execute()
+        print(f"[calendar_service] Deleted event: {event.get('summary', '')} at {date_str} {time_str}")
+
+    return True
+
+
 def create_appointment(name: str, date_str: str, time_str: str) -> str:
     """
     Create a 1-hour appointment in Google Calendar.

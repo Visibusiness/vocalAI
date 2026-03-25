@@ -14,7 +14,7 @@ from fastapi.concurrency import run_in_threadpool
 from faster_whisper import WhisperModel
 
 from app.appointment_parser import extract_appointment
-from app.calendar_service import create_appointment, check_conflict
+from app.calendar_service import create_appointment, check_conflict, cancel_appointment
 
 app = FastAPI()
 stt_model = None
@@ -24,19 +24,22 @@ redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=T
 
 SYSTEM_PROMPT = """
 Ești TestRec, recepționera clinicii TestClinic.
-Rolul tău principal este să ajuți pacienții să programeze consultații.
+Rolul tău principal este să ajuți pacienții să programeze sau să anuleze consultații.
 
 Cum să te comporți:
 - Vorbește natural, politicos și prietenos în limba română.
-- Colectează aceste informații înainte de a confirma programarea:
+- Pentru PROGRAMARE, colectează:
     1. Numele complet al pacientului
     2. Data dorită (zi, lună, an)
     3. Ora dorită
+- Pentru ANULARE, colectează:
+    1. Data programării (zi, lună, an)
+    2. Ora programării
 - Dacă lipsește vreo informație, întreabă politicos.
-- Când ai toate informațiile și pacientul confirmă programarea, răspunde natural
-  și adaugă UN SINGUR bloc JSON la sfârșitul mesajului, exact în formatul de mai jos.
+- Când ai toate informațiile și pacientul confirmă, răspunde natural
+  și adaugă UN SINGUR bloc JSON la sfârșitul mesajului, exact în formatele de mai jos.
 
-Format JSON (doar când programarea este confirmată):
+Format JSON pentru programare (doar când pacientul confirmă):
 ```json
 {
   "action": "schedule",
@@ -46,8 +49,17 @@ Format JSON (doar când programarea este confirmată):
 }
 ```
 
+Format JSON pentru anulare (doar când pacientul confirmă anularea):
+```json
+{
+  "action": "cancel",
+  "date": "YYYY-MM-DD",
+  "time": "HH:MM"
+}
+```
+
 Important:
-- Nu include blocul JSON decât dacă pacientul a confirmat explicit programarea.
+- Nu include blocul JSON decât dacă pacientul a confirmat explicit acțiunea.
 - Nu inventa informații — dacă nu știi data sau ora, întreabă.
 - Răspunsul natural vine ÎNAINTE de blocul JSON.
 """
@@ -122,48 +134,85 @@ async def voice_endpoint(
         clean_text, appointment = extract_appointment(ai_reply)
 
         if appointment:
+            action = appointment.get("action")
             try:
-                conflict = await run_in_threadpool(
-                    check_conflict,
-                    appointment["date"],
-                    appointment["time"],
-                )
-                if conflict:
-                    print(f"[main] Conflict detectat pentru {appointment['date']} {appointment['time']}", flush=True)
-                    # Inject a system note and re-run the LLM so it responds naturally
-                    messages.append({
-                        "role": "system",
-                        "content": (
-                            f"Intervalul {appointment['time']} din {appointment['date']} este deja ocupat. "
-                            "Informează pacientul politicos că acel interval nu este disponibil și propune-i "
-                            "să aleagă o altă oră sau zi. Nu include niciun bloc JSON în răspuns."
-                        ),
-                    })
-                    conflict_response = await run_in_threadpool(
-                        ollama.chat,
-                        model="hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M",
-                        messages=messages,
-                        options={"temperature": 0.3, "num_ctx": 8192},
-                    )
-                    ai_reply = conflict_response["message"]["content"].strip()
-                    if not ai_reply:
-                        ai_reply = (
-                            f"Îmi pare rău, intervalul de la ora {appointment['time']} "
-                            f"din data de {appointment['date']} este deja ocupat. "
-                            "Doriți să alegeți o altă oră sau zi?"
-                        )
-                    clean_text = ai_reply
-                    print(f"AI [{session_id}] (conflict):", ai_reply, flush=True)
-                else:
-                    event_link = await run_in_threadpool(
-                        create_appointment,
-                        appointment["name"],
+                if action == "schedule":
+                    conflict = await run_in_threadpool(
+                        check_conflict,
                         appointment["date"],
                         appointment["time"],
                     )
-                    print(f"[main] Programare creata: {event_link}", flush=True)
+                    if conflict:
+                        print(f"[main] Conflict detectat pentru {appointment['date']} {appointment['time']}", flush=True)
+                        messages.append({
+                            "role": "system",
+                            "content": (
+                                f"Intervalul {appointment['time']} din {appointment['date']} este deja ocupat. "
+                                "Informează pacientul politicos că acel interval nu este disponibil și propune-i "
+                                "să aleagă o altă oră sau zi. Nu include niciun bloc JSON în răspuns."
+                            ),
+                        })
+                        conflict_response = await run_in_threadpool(
+                            ollama.chat,
+                            model="hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M",
+                            messages=messages,
+                            options={"temperature": 0.3, "num_ctx": 8192},
+                        )
+                        ai_reply = conflict_response["message"]["content"].strip()
+                        if not ai_reply:
+                            ai_reply = (
+                                f"Îmi pare rău, intervalul de la ora {appointment['time']} "
+                                f"din data de {appointment['date']} este deja ocupat. "
+                                "Doriți să alegeți o altă oră sau zi?"
+                            )
+                        clean_text = ai_reply
+                        print(f"AI [{session_id}] (conflict):", ai_reply, flush=True)
+                    else:
+                        event_link = await run_in_threadpool(
+                            create_appointment,
+                            appointment["name"],
+                            appointment["date"],
+                            appointment["time"],
+                        )
+                        print(f"[main] Programare creata: {event_link}", flush=True)
+
+                elif action == "cancel":
+                    deleted = await run_in_threadpool(
+                        cancel_appointment,
+                        appointment["date"],
+                        appointment["time"],
+                    )
+                    if not deleted:
+                        print(f"[main] Anulare: nicio programare gasita pentru {appointment['date']} {appointment['time']}", flush=True)
+                        messages.append({
+                            "role": "system",
+                            "content": (
+                                f"Nu a fost găsită nicio programare pe data de {appointment['date']} "
+                                f"la ora {appointment['time']}. "
+                                "Informează pacientul politicos și întreabă dacă dorește să verifice altă dată sau oră. "
+                                "Nu include niciun bloc JSON în răspuns."
+                            ),
+                        })
+                        not_found_response = await run_in_threadpool(
+                            ollama.chat,
+                            model="hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M",
+                            messages=messages,
+                            options={"temperature": 0.3, "num_ctx": 8192},
+                        )
+                        ai_reply = not_found_response["message"]["content"].strip()
+                        if not ai_reply:
+                            ai_reply = (
+                                f"Nu am găsit nicio programare pe data de {appointment['date']} "
+                                f"la ora {appointment['time']}. "
+                                "Doriți să verificați o altă dată sau oră?"
+                            )
+                        clean_text = ai_reply
+                        print(f"AI [{session_id}] (cancel-not-found):", ai_reply, flush=True)
+                    else:
+                        print(f"[main] Programare anulata: {appointment['date']} {appointment['time']}", flush=True)
+
             except Exception as e:
-                print(f"[main] Eroare la creare programare: {e}", flush=True)
+                print(f"[main] Eroare la procesare programare: {e}", flush=True)
 
         # MEMORIA: Salvam istoricul actualizat in Redis ---
         # Salvam raspunsul complet (cu JSON) in istoric, dar trimitem doar textul curat la TTS

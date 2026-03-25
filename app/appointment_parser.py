@@ -15,12 +15,17 @@ import json
 # Matches a fenced ```json ... ``` block (multiline)
 _JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
 
-REQUIRED_KEYS = {"action", "name", "date", "time"}
+REQUIRED_KEYS_SCHEDULE = {"action", "name", "date", "time"}
+REQUIRED_KEYS_CANCEL = {"action", "date", "time"}
 
 
 def extract_appointment(ai_reply: str) -> tuple[str, dict | None]:
     """
     Parse the LLM reply and extract an appointment JSON block if present.
+
+    Handles two actions:
+      - "schedule": requires name, date, time
+      - "cancel":   requires date, time
 
     Returns:
         clean_text    - the reply text with the JSON block stripped out
@@ -42,13 +47,22 @@ def extract_appointment(ai_reply: str) -> tuple[str, dict | None]:
         print(f"[appointment_parser] JSON decode error: {e}")
         return clean_text, None
 
-    # Validate required keys and action type
-    if not REQUIRED_KEYS.issubset(data.keys()):
-        missing = REQUIRED_KEYS - data.keys()
-        print(f"[appointment_parser] Missing keys: {missing}")
-        return clean_text, None
+    action = data.get("action")
 
-    if data.get("action") != "schedule":
+    if action == "schedule":
+        if not REQUIRED_KEYS_SCHEDULE.issubset(data.keys()):
+            missing = REQUIRED_KEYS_SCHEDULE - data.keys()
+            print(f"[appointment_parser] Missing keys for schedule: {missing}")
+            return clean_text, None
+
+    elif action == "cancel":
+        if not REQUIRED_KEYS_CANCEL.issubset(data.keys()):
+            missing = REQUIRED_KEYS_CANCEL - data.keys()
+            print(f"[appointment_parser] Missing keys for cancel: {missing}")
+            return clean_text, None
+
+    else:
+        print(f"[appointment_parser] Unknown action: {action}")
         return clean_text, None
 
     return clean_text, data
