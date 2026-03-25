@@ -39,6 +39,39 @@ def _get_service():
     return build("calendar", "v3", credentials=credentials)
 
 
+def check_conflict(date_str: str, time_str: str) -> bool:
+    """
+    Return True if there is already an event overlapping the requested 1-hour slot.
+
+    Args:
+        date_str : date in "YYYY-MM-DD" format
+        time_str : time in "HH:MM" format
+    """
+    try:
+        start_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        return False
+
+    end_dt = start_dt + timedelta(hours=1)
+
+    # Google Calendar expects RFC3339 with timezone offset
+    # We query with UTC bounds that cover the Europe/Bucharest slot
+    # Using isoformat with Z suffix after converting; simplest: query with timeMin/timeMax
+    time_min = start_dt.strftime("%Y-%m-%dT%H:%M:%S") + "+02:00"
+    time_max = end_dt.strftime("%Y-%m-%dT%H:%M:%S") + "+02:00"
+
+    service = _get_service()
+    events_result = service.events().list(
+        calendarId=CALENDAR_ID,
+        timeMin=time_min,
+        timeMax=time_max,
+        singleEvents=True,
+    ).execute()
+
+    events = events_result.get("items", [])
+    return len(events) > 0
+
+
 def create_appointment(name: str, date_str: str, time_str: str) -> str:
     """
     Create a 1-hour appointment in Google Calendar.

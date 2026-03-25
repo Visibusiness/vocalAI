@@ -14,7 +14,7 @@ from fastapi.concurrency import run_in_threadpool
 from faster_whisper import WhisperModel
 
 from app.appointment_parser import extract_appointment
-from app.calendar_service import create_appointment
+from app.calendar_service import create_appointment, check_conflict
 
 app = FastAPI()
 stt_model = None
@@ -123,15 +123,41 @@ async def voice_endpoint(
 
         if appointment:
             try:
-                event_link = await run_in_threadpool(
-                    create_appointment,
-                    appointment["name"],
+                conflict = await run_in_threadpool(
+                    check_conflict,
                     appointment["date"],
                     appointment["time"],
                 )
-                print(f"[main] Programare creata: {event_link}")
+                if conflict:
+                    print(f"[main] Conflict detectat pentru {appointment['date']} {appointment['time']}", flush=True)
+                    # Inject a system note and re-run the LLM so it responds naturally
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            f"Intervalul {appointment['time']} din {appointment['date']} este deja ocupat. "
+                            "Informează pacientul politicos că acel interval nu este disponibil și propune-i "
+                            "să aleagă o altă oră sau zi. Nu include niciun bloc JSON în răspuns."
+                        ),
+                    })
+                    conflict_response = await run_in_threadpool(
+                        ollama.chat,
+                        model="hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M",
+                        messages=messages,
+                        options={"temperature": 0.3, "num_ctx": 8192},
+                    )
+                    ai_reply = conflict_response["message"]["content"].strip()
+                    clean_text = ai_reply
+                    print(f"AI [{session_id}] (conflict):", ai_reply, flush=True)
+                else:
+                    event_link = await run_in_threadpool(
+                        create_appointment,
+                        appointment["name"],
+                        appointment["date"],
+                        appointment["time"],
+                    )
+                    print(f"[main] Programare creata: {event_link}", flush=True)
             except Exception as e:
-                print(f"[main] Eroare la creare programare: {e}")
+                print(f"[main] Eroare la creare programare: {e}", flush=True)
 
         # MEMORIA: Salvam istoricul actualizat in Redis ---
         # Salvam raspunsul complet (cu JSON) in istoric, dar trimitem doar textul curat la TTS
