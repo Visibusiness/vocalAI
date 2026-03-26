@@ -216,11 +216,44 @@ That's it. Steps 1 and 2 never need to be repeated — only steps 3 and 4 when m
 
 ---
 
+## Session Summary — 2026-03-26
+
+### Features implemented
+
+- **Conflict checking** — before booking, server queries Google Calendar for existing events in the 1-hour slot; if occupied, LLM is re-run with a system note and proposes another time
+- **Appointment cancellation** — patient says they want to cancel, LLM outputs `{"action":"cancel",...}`, server finds and deletes the event from Google Calendar; if not found, LLM is re-run to respond naturally
+- **Appointment check** — patient asks if they have a booking; LLM outputs `{"action":"check",...}`, server queries the calendar and injects the real result, LLM responds with accurate info
+- **Past date validation** — server rejects booking dates in the past, re-runs LLM to ask for a future date
+- **Null JSON guard** — parser rejects any JSON block with null values so the AI cannot trigger an action before collecting all required info
+- **Current date in system prompt** — `build_system_prompt()` injects today's date so the AI knows the year and stops asking patients for it
+
+### Files modified
+
+| File | What changed |
+|---|---|
+| `app/main.py` | Conflict check, cancel, check, past-date validation, null guard, dynamic system prompt with today's date |
+| `app/appointment_parser.py` | Handle `cancel` and `check` actions; reject null values |
+| `app/calendar_service.py` | Add `check_conflict()`, `cancel_appointment()`, `get_appointments()` |
+| `client.py` | Print session ID before each request; updated SERVER_URL |
+| `README.md` | Created — simple workflow overview |
+| `CLAUDE.md` | Added Google Calendar setup section |
+
+### Known limitations
+
+- **Check by day (no specific time)** — if patient asks "do I have anything on March 25", the AI uses `00:00` as the time which finds nothing. Full-day scan not yet implemented.
+- **Date robustness** — vague dates like "mâine" or "vineri" work if the LLM resolves them correctly, but there is no server-side normalization fallback.
+
+---
+
 ## Next Steps
 
-- [x] **Fix Google Calendar 404** — calendar shared with service account, booking confirmed working ✅
-- [ ] **LLM reliability testing** — check if Gemma-3 consistently outputs the JSON block in the right format; adjust the system prompt if needed
-- [ ] **Date parsing robustness** — users may say "mâine" or "vineri"; consider adding a date normalization step before passing to the calendar API
-- [ ] **Conflict checking** — before creating an event, query the calendar for existing events at that time slot and inform the patient if it's taken
-- [ ] **Confirmation SMS/email** — after booking, notify the patient via an external service (Twilio, SendGrid, etc.)
-- [ ] **Docker update** — add `GOOGLE_CALENDAR_ID` env var to the `docker run` command and ensure `credentials.json` is mounted into the container
+- [x] **Fix Google Calendar 404** ✅
+- [x] **Conflict checking** ✅
+- [x] **Appointment cancellation** ✅
+- [x] **Appointment check (real calendar lookup)** ✅
+- [x] **Past date validation** ✅
+- [ ] **Full-day check** — when patient asks "do I have anything on [date]" without a time, scan the whole day
+- [ ] **Date robustness** — server-side normalization for vague dates ("mâine", "vineri viitoare")
+- [ ] **Confirmation SMS/email** — notify patient via Twilio/SendGrid after booking
+- [ ] **Twilio integration** — replace `client.py` with a Twilio webhook endpoint
+- [ ] **Docker update** — add `GOOGLE_CALENDAR_ID` env var and mount `credentials.json`
