@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Does
 
-VocalAI is a voice-based conversational AI receptionist ("TestAi") for a clinic called TestClinic. It accepts a WAV audio file, transcribes it, passes it through an LLM, and returns an MP3 response. All conversation is in Romanian.
+VocalAI is a voice-based conversational AI receptionist ("TestRec") for a clinic called TestClinic. It accepts a WAV audio file, transcribes it, passes it through an LLM, and returns an MP3 response. All conversation is in Romanian.
 
-**Pipeline:** WAV → Faster-Whisper (STT) → Redis (history) → Ollama/Gemma-3-27B (LLM) → Edge-TTS → MP3
+**Pipeline:** WAV → Faster-Whisper (STT) → Redis (history) → Ollama/Gemma-3-27B (LLM) → Google Calendar API → Edge-TTS → MP3
 
 ## Running the Server
 
@@ -52,31 +52,58 @@ curl -X POST http://localhost:8000/voice \
 
 ## Architecture
 
-### `app/main.py` — Single-file FastAPI server
+### `app/main.py` — FastAPI server
 
-- Whisper model is loaded once at startup (`@app.on_event("startup")`) into global `stt_model`
+- Whisper and Ollama are pre-loaded at startup to eliminate cold start on first request
 - The only endpoint is `POST /voice`: receives `file` (WAV) + `session_id` (form fields)
-- Conversation history is stored in Redis under the `session_id` key as a JSON array of `{role, content}` messages with a 600-second TTL
-- Blocking operations (Whisper transcription, Ollama chat) run via `run_in_threadpool` to avoid blocking the async event loop
-- Temp files (`in_<uuid>.wav`, `out_<uuid>.mp3`) are created per-request and deleted by a background task 2 seconds after the response is sent
+- `session_id` is the patient's phone number when using `--phone` flag, otherwise a random ID
+- Conversation history stored in Redis under `session_id` as JSON array of `{role, content}` messages with 600s TTL
+- Blocking operations (Whisper, Ollama) run via `run_in_threadpool` to avoid blocking the async event loop
+- After LLM reply, `extract_appointment()` parses a JSON action block; the server routes to the appropriate handler
+- Temp files (`in_<uuid>.wav`, `out_<uuid>.mp3`) deleted by background task 2 seconds after response
+
+### JSON action system
+
+The LLM appends a fenced ` ```json ``` ` block to trigger server-side actions. The block is stripped before TTS.
+
+| Action | Required fields | What server does |
+|---|---|---|
+| `schedule` | `name`, `date`, `time` | Checks conflict → creates Google Calendar event |
+| `cancel` | `date`, `time` | Finds and deletes the event at that slot |
+| `check` | `date`, `time` | Queries calendar, injects result, re-runs LLM |
+| `list` | _(none)_ | Lists all future events matching phone number |
+
+### `app/appointment_parser.py`
+
+Extracts and validates the JSON block from LLM replies. Rejects blocks with `null` values (AI sent too early).
+
+### `app/calendar_service.py`
+
+Google Calendar service account integration. Functions: `create_appointment`, `check_conflict`, `cancel_appointment`, `get_appointments`, `list_appointments`.
 
 ### LLM model
 
-- Model: `hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M` pulled directly via Ollama (no alias)
-- Called directly by name in `app/main.py` with `temperature=0.3`
+- Model: `hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M` via Ollama, `temperature=0.3`, `num_ctx=8192`
+- System prompt built dynamically by `build_system_prompt()` — injects today's date so AI knows the current year
 
 ### Key runtime dependencies
 
-- **Redis** must be running on `localhost:6379` before the FastAPI app starts
-- **Ollama** must be running on `localhost:11434` with `hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M` pulled
-- **CUDA GPU** is required — Whisper loads with `device="cuda", compute_type="float16"`
+- **Redis** must be running on `localhost:6379`
+- **Ollama** must be running on `localhost:11434` with the Gemma-3 model pulled
+- **CUDA GPU** required — Whisper loads with `device="cuda", compute_type="float16"`
 - **Edge-TTS** makes outbound HTTPS calls to Microsoft; requires internet access
+- **`credentials.json`** — Google service account key must be present in project root
+
+## Clients
+
+- **`client.py`** — mic-based client; `--phone +40xxx` uses phone as session ID, `--new` resets session
+- **`test_client.py`** — text-based test client; `--text "..."` converts text to WAV via Edge-TTS and sends to server
 
 ## Changing the AI Persona or Voice
 
-- System prompt: `SYSTEM_PROMPT` constant in `app/main.py` — injected as the first message in Redis history for new sessions
-- TTS voice: `"ro-RO-AlinaNeural"` in `app/main.py` — change to any Edge-TTS Romanian voice
-- LLM model: update the model name string in `app/main.py` and re-pull via `ollama pull <model>`
+- System prompt: `build_system_prompt()` in `app/main.py`
+- TTS voice: `"ro-RO-AlinaNeural"` in `app/main.py`
+- LLM model: update model name string in `app/main.py` and re-pull via `ollama pull <model>`
 
 ---
 
@@ -165,18 +192,10 @@ curl -X POST http://localhost:8000/voice \
 
 ### Google Calendar status
 
-- `credentials.json` — copied to `/workspace/vocalAI/credentials.json` on RunPod ✅
-- `CALENDAR_ID` — hardcoded to `calinanicolas91@gmail.com` in `app/calendar_service.py` ✅
-- Appointment parsing — working correctly (JSON extracted, name/date/time parsed) ✅
-- Calendar event creation — **FAILING with 404 Not Found** ❌
-
-**Root cause of 404**: The Google Calendar has not been shared with the service account email.
-
-**Fix needed (one-time, in Google Calendar UI)**:
-1. Find service account email: `python3 -c "import json; d=json.load(open('/workspace/vocalAI/credentials.json')); print(d['client_email'])"`
-2. Open Google Calendar → 3 dots next to calendar → Settings and sharing → Share with specific people
-3. Add the service account email with **"Make changes to events"** permission
-4. Restart the server
+- `credentials.json` — service account key present on RunPod ✅
+- `CALENDAR_ID` — passed via `GOOGLE_CALENDAR_ID` env var at server start ✅
+- Calendar shared with service account email ✅
+- Booking, cancellation, conflict check, list — all working ✅
 
 ---
 
@@ -213,6 +232,25 @@ GOOGLE_CALENDAR_ID="your-email@gmail.com" uvicorn app.main:app --host 0.0.0.0 --
 ```
 
 That's it. Steps 1 and 2 never need to be repeated — only steps 3 and 4 when moving to a new server.
+
+---
+
+## Session Summary — 2026-03-26
+
+### Features implemented
+
+- **Conflict checking** — before booking, server queries Google Calendar for the 1-hour slot; if taken, LLM re-run proposes another time
+- **Appointment cancellation** — `cancel` action deletes the event; if not found, LLM re-run responds naturally
+- **Appointment check** — `check` action queries calendar and injects real result back before LLM responds
+- **Past date validation** — server rejects booking dates in the past, re-runs LLM to ask for future date
+- **Null JSON guard** — `appointment_parser.py` rejects blocks with any `null` values so incomplete JSON never triggers an action
+- **Current date in system prompt** — `build_system_prompt()` injects today's date; AI no longer asks patients for the year
+- **Session ID debug print** — `client.py` prints `[session] <id>` before each request
+
+### Known limitations
+
+- **Check by full day** — patient asking "do I have anything on March 25" (no specific time) causes AI to use `00:00`, always returning empty. Full-day scan not yet implemented.
+- **Vague dates** — "mâine", "vineri viitoare" work if LLM resolves them correctly; no server-side normalization fallback.
 
 ---
 
