@@ -216,44 +216,48 @@ That's it. Steps 1 and 2 never need to be repeated — only steps 3 and 4 when m
 
 ---
 
-## Session Summary — 2026-03-26
+## Next Steps
 
-### Features implemented
-
-- **Conflict checking** — before booking, server queries Google Calendar for existing events in the 1-hour slot; if occupied, LLM is re-run with a system note and proposes another time
-- **Appointment cancellation** — patient says they want to cancel, LLM outputs `{"action":"cancel",...}`, server finds and deletes the event from Google Calendar; if not found, LLM is re-run to respond naturally
-- **Appointment check** — patient asks if they have a booking; LLM outputs `{"action":"check",...}`, server queries the calendar and injects the real result, LLM responds with accurate info
-- **Past date validation** — server rejects booking dates in the past, re-runs LLM to ask for a future date
-- **Null JSON guard** — parser rejects any JSON block with null values so the AI cannot trigger an action before collecting all required info
-- **Current date in system prompt** — `build_system_prompt()` injects today's date so the AI knows the year and stops asking patients for it
-
-### Files modified
-
-| File | What changed |
-|---|---|
-| `app/main.py` | Conflict check, cancel, check, past-date validation, null guard, dynamic system prompt with today's date |
-| `app/appointment_parser.py` | Handle `cancel` and `check` actions; reject null values |
-| `app/calendar_service.py` | Add `check_conflict()`, `cancel_appointment()`, `get_appointments()` |
-| `client.py` | Print session ID before each request; updated SERVER_URL |
-| `README.md` | Created — simple workflow overview |
-| `CLAUDE.md` | Added Google Calendar setup section |
-
-### Known limitations
-
-- **Check by day (no specific time)** — if patient asks "do I have anything on March 25", the AI uses `00:00` as the time which finds nothing. Full-day scan not yet implemented.
-- **Date robustness** — vague dates like "mâine" or "vineri" work if the LLM resolves them correctly, but there is no server-side normalization fallback.
+- [x] **Fix Google Calendar 404** — calendar shared with service account, booking confirmed working ✅
+- [x] **Conflict checking** — checks for existing events before booking, informs patient if slot is taken ✅
+- [x] **Date parsing robustness** — system prompt enforces current year, handles "mâine"/"azi" etc. ✅
+- [x] **Phone number as session ID** — `--phone` arg on both clients; stored in calendar event description ✅
+- [x] **List appointments action** — patient can ask "ce programare am?" and system queries calendar by phone ✅
+- [x] **Confirmation gate fixed** — AI now asks confirmation in a separate turn before sending schedule/cancel JSON ✅
+- [ ] **Confirmation SMS/email** — after booking, notify the patient via Twilio/SendGrid
+- [ ] **Twilio integration** — replace manual `--phone` arg with real inbound call handler
+- [ ] **Docker update** — add `GOOGLE_CALENDAR_ID` env var and mount `credentials.json` into container
+- [ ] **LLM reliability** — stress-test edge cases (interruptions mid-booking, ambiguous confirmations)
 
 ---
 
-## Next Steps
+## Session Summary — 2026-03-25 (bug fixes & list action)
 
-- [x] **Fix Google Calendar 404** ✅
-- [x] **Conflict checking** ✅
-- [x] **Appointment cancellation** ✅
-- [x] **Appointment check (real calendar lookup)** ✅
-- [x] **Past date validation** ✅
-- [ ] **Full-day check** — when patient asks "do I have anything on [date]" without a time, scan the whole day
-- [ ] **Date robustness** — server-side normalization for vague dates ("mâine", "vineri viitoare")
-- [ ] **Confirmation SMS/email** — notify patient via Twilio/SendGrid after booking
-- [ ] **Twilio integration** — replace `client.py` with a Twilio webhook endpoint
-- [ ] **Docker update** — add `GOOGLE_CALENDAR_ID` env var and mount `credentials.json`
+### Problems found during testing
+
+| Issue | Root cause | Fix |
+|---|---|---|
+| Appointment created before confirmation | AI sent JSON in same turn as confirmation question | System prompt: explicit rule to never send JSON in same turn as confirmation |
+| AI announced date deductions aloud | No rule against explaining reasoning | System prompt: "do not explain deductions, use them silently" |
+| "Este liber mâine la 10?" didn't trigger check | AI gave generic greeting instead | System prompt: clearer rule that date+time present → send check JSON immediately |
+| "Ce programare am?" not handled | No `list` action existed | Added `list` action end-to-end |
+| f-string ValueError on startup | JSON example blocks used bare `{}` in f-string | Escaped all literal braces as `{{}}` |
+| LLM used year 2024 instead of current | Weak year rule in system prompt | Hardened: "ALWAYS use {today.year}, NEVER another year" |
+
+### New files / changes
+
+| File | What changed |
+|---|---|
+| `app/calendar_service.py` | Added `list_appointments(phone)` — queries future events by phone via Google Calendar `q` param |
+| `app/appointment_parser.py` | Added `"list"` action (only requires `action` key) |
+| `app/main.py` | Import `list_appointments`; handle `list` action; rewrote system prompt behavior rules |
+| `test_client.py` | New text-based test client (edge-tts → WAV → POST); `--phone` and `--text` args |
+| `client.py` | Added `--phone` arg (uses phone as session ID) |
+
+### How `list` works
+
+1. Patient says "ce programare am?" / "am vreo programare?"
+2. LLM emits `` ```json {"action": "list"} ``` ``
+3. Server calls `list_appointments(session_id)` — queries Google Calendar with `q=<phone>`
+4. Results injected back as system message → LLM replies naturally
+5. Clean text returned as audio

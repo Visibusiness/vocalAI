@@ -28,7 +28,7 @@ import sounddevice as sd
 import soundfile as sf
 from pydub import AudioSegment
 
-SERVER_URL = "https://5049t9hr9gb3zk-8000.proxy.runpod.net/voice"
+SERVER_URL = "https://enwpc4da4zg5nw-8000.proxy.runpod.net/voice"
 
 SAMPLE_RATE = 16000   # Hz — Whisper works best at 16 kHz
 CHANNELS = 1
@@ -116,6 +116,11 @@ def load_or_create_session(new: bool) -> str:
 def main():
     parser = argparse.ArgumentParser(description="VocalAI voice client")
     parser.add_argument(
+        "--phone",
+        default=None,
+        help="Patient phone number — used as session ID (e.g. +40721000000)",
+    )
+    parser.add_argument(
         "--session",
         default=None,
         help="Session ID (default: reuse last session from .session_id file)",
@@ -133,7 +138,12 @@ def main():
     )
     args = parser.parse_args()
 
-    session_id = args.session if args.session else load_or_create_session(args.new)
+    if args.phone:
+        session_id = args.phone
+    elif args.session:
+        session_id = args.session
+    else:
+        session_id = load_or_create_session(args.new)
 
     print(f"\nVocalAI Client  |  session={session_id}  |  server={SERVER_URL}")
     print("Press Ctrl+C to quit.\n")
@@ -142,6 +152,7 @@ def main():
         try:
             input("Press Enter to record...")
             wav_bytes = record_audio(args.duration)
+            print(f"[session] {session_id}")
             send_and_play(wav_bytes, session_id)
             print()
         except KeyboardInterrupt:

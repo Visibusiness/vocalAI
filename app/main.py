@@ -2,7 +2,7 @@ import os
 import uuid
 import asyncio
 import json
-from datetime import date as date_type, datetime as dt
+from datetime import date as date_type, datetime as dt, timedelta
 from urllib.parse import quote, unquote
 import torch  # must be imported before faster_whisper to init CUDA lib paths
 import redis
@@ -15,7 +15,7 @@ from fastapi.concurrency import run_in_threadpool
 from faster_whisper import WhisperModel
 
 from app.appointment_parser import extract_appointment
-from app.calendar_service import create_appointment, check_conflict, cancel_appointment, get_appointments
+from app.calendar_service import create_appointment, check_conflict, cancel_appointment, get_appointments, list_appointments
 
 app = FastAPI()
 stt_model = None
@@ -31,45 +31,63 @@ Ești TestRec, recepționera clinicii TestClinic.
 Rolul tău principal este să ajuți pacienții să programeze, să anuleze sau să verifice consultații.
 
 Data de astăzi este: {today_str}. Anul curent este {today.year}.
-Dacă pacientul nu specifică anul, folosește {today.year} (sau {today.year + 1} dacă data menționată a trecut deja în {today.year}).
-NU întreba pacientul despre an dacă nu este necesar — deduce-l din context.
+REGULI STRICTE PENTRU AN:
+- Dacă pacientul nu specifică anul, folosește ÎNTOTDEAUNA {today.year}. NICIODATĂ alt an (ex: 2024, 2025).
+- NU întreba pacientul despre an în nicio situație. Deduce singur: dacă data a trecut deja în {today.year}, folosește {today.year + 1}.
+- NU programa sau verifica date din trecut. Dacă data este anterioară față de astăzi ({today_str}), informează pacientul că nu este posibil.
 
 Cum să te comporți:
 - Vorbește natural, politicos și prietenos în limba română.
-- Pentru PROGRAMARE, colectează: numele complet, data (zi, lună), ora.
-- Pentru ANULARE, colectează: data programării (zi, lună), ora programării.
-- Pentru VERIFICARE, colectează: data (zi, lună), ora.
-- Dacă lipsește vreo informație, întreabă politicos.
+- NU cere niciodată numărul de telefon al pacientului — îl avem deja în sistem.
+- NU repeta sau explica cum ai dedus data — folosește-o direct în confirmare.
 - NU trimite blocul JSON dacă oricare câmp este necunoscut — mai întâi colectează toate informațiile.
-- Când ai TOATE informațiile necesare și completate, răspunde natural și adaugă UN SINGUR bloc JSON,
-  exact în formatele de mai jos.
+
+REGULI CRITICE DE CONFIRMARE:
+- Pentru PROGRAMARE: colectează numele complet, data, ora. Când le ai pe toate, cere confirmare
+  într-un mesaj separat (ex: "Confirmați programarea pentru Ion Popescu pe 26 martie la 10:00?").
+  Trimite blocul JSON DOAR după ce pacientul răspunde explicit cu "da", "confirm", "corect" etc.
+  NICIODATĂ nu trimite blocul JSON în același mesaj în care ceri confirmarea.
+- Pentru ANULARE: colectează data și ora. Cere confirmare. Trimite blocul JSON DOAR după "da".
+  NICIODATĂ nu trimite blocul JSON în același mesaj în care ceri confirmarea.
+- Pentru VERIFICARE: când ai data și ora, trimite IMEDIAT blocul JSON cu action "check".
+  Nu mai cere confirmare — este doar o interogare.
+- Pentru LISTA PROGRAMĂRI: când pacientul întreabă "ce programare am", "am programări", "când am programare"
+  sau orice întrebare despre programările sale fără să specifice o dată anume, trimite IMEDIAT blocul JSON
+  cu action "list". Nu cere date suplimentare.
+
+Când ai TOATE informațiile și confirmarea necesară, adaugă UN SINGUR bloc JSON exact în formatele de mai jos.
 
 Format JSON pentru programare (după ce pacientul confirmă):
 ```json
-{
+{{
   "action": "schedule",
   "name": "Numele Pacientului",
   "date": "YYYY-MM-DD",
   "time": "HH:MM"
-}
+}}
 ```
 
 Format JSON pentru anulare (după ce pacientul confirmă anularea):
 ```json
-{
+{{
   "action": "cancel",
   "date": "YYYY-MM-DD",
   "time": "HH:MM"
-}
+}}
 ```
 
 Format JSON pentru verificare (imediat ce ai data și ora, fără să mai aștepți confirmare):
 ```json
-{
+{{
   "action": "check",
   "date": "YYYY-MM-DD",
   "time": "HH:MM"
-}
+}}
+```
+
+Format JSON pentru lista programărilor pacientului (imediat, fără să ceri alte informații):
+```json
+{{"action": "list"}}
 ```
 
 REGULI STRICTE — TREBUIE RESPECTATE ÎNTOTDEAUNA:
@@ -86,7 +104,7 @@ REGULI STRICTE — TREBUIE RESPECTATE ÎNTOTDEAUNA:
 Exemplu corect când pacientul întreabă dacă are o programare:
 "Verificăm imediat în sistem..."
 ```json
-{"action": "check", "date": "2026-03-25", "time": "15:00"}
+{{"action": "check", "date": "{(today + timedelta(days=7)).strftime('%Y-%m-%d')}", "time": "15:00"}}
 ```
 """
 
@@ -115,7 +133,7 @@ def get_stt_model():
 async def voice_endpoint(
     background_tasks: BackgroundTasks, 
     file: UploadFile = File(...),
-    session_id: str = Form(...) # primim ID-ul sesiunii (ex: numar telefon)
+    session_id: str = Form(...) # numarul de telefon al pacientului (ex: +40721000000)
 ):
     unique_id = uuid.uuid4().hex
     input_path = f"in_{unique_id}.wav"
@@ -139,10 +157,10 @@ async def voice_endpoint(
 
         if history_json:
             messages = json.loads(history_json)
-            print(f"[redis] Loaded {len(messages)} messages for session {session_id}", flush=True)
+            print(f"[redis] Loaded {len(messages)} messages for phone {session_id}", flush=True)
         else:
             messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-            print(f"[redis] New session {session_id}", flush=True)
+            print(f"[redis] New session for phone {session_id}", flush=True)
 
         # adaugam ce a spus clientul ACUM
         messages.append({"role": "user", "content": user_text})
@@ -225,10 +243,21 @@ async def voice_endpoint(
                                 appointment["name"],
                                 appointment["date"],
                                 appointment["time"],
+                                session_id,
                             )
                             print(f"[main] Programare creata: {event_link}", flush=True)
 
                 elif action == "cancel":
+                    appt_date = dt.strptime(appointment["date"], "%Y-%m-%d").date()
+                    if appt_date < date_type.today():
+                        print(f"[main] Cancel ignorat — data in trecut: {appointment['date']}", flush=True)
+                        clean_text = f"Data de {appointment['date']} este în trecut. Nu există programări active pentru date trecute."
+                        messages.append({"role": "assistant", "content": clean_text})
+                        redis_client.setex(session_id, 600, json.dumps(messages))
+                        communicate = edge_tts.Communicate(clean_text, "ro-RO-AlinaNeural")
+                        await communicate.save(output_path)
+                        background_tasks.add_task(cleanup_files, input_path, output_path)
+                        return FileResponse(output_path, media_type="audio/mpeg", headers={"X-AI-Text": quote(clean_text)})
                     deleted = await run_in_threadpool(
                         cancel_appointment,
                         appointment["date"],
@@ -264,6 +293,16 @@ async def voice_endpoint(
                         print(f"[main] Programare anulata: {appointment['date']} {appointment['time']}", flush=True)
 
                 elif action == "check":
+                    appt_date = dt.strptime(appointment["date"], "%Y-%m-%d").date()
+                    if appt_date < date_type.today():
+                        print(f"[main] Check ignorat — data in trecut: {appointment['date']}", flush=True)
+                        clean_text = f"Data de {appointment['date']} este în trecut. Puteți verifica doar programări viitoare."
+                        messages.append({"role": "assistant", "content": clean_text})
+                        redis_client.setex(session_id, 600, json.dumps(messages))
+                        communicate = edge_tts.Communicate(clean_text, "ro-RO-AlinaNeural")
+                        await communicate.save(output_path)
+                        background_tasks.add_task(cleanup_files, input_path, output_path)
+                        return FileResponse(output_path, media_type="audio/mpeg", headers={"X-AI-Text": quote(clean_text)})
                     events = await run_in_threadpool(
                         get_appointments,
                         appointment["date"],
@@ -301,6 +340,40 @@ async def voice_endpoint(
                         )
                     clean_text = ai_reply
                     print(f"AI [{session_id}] (check):", ai_reply, flush=True)
+
+                elif action == "list":
+                    appts = await run_in_threadpool(list_appointments, session_id)
+                    if appts:
+                        appt_lines = "\n".join(
+                            f"- {a['summary']} la {a['start']}" for a in appts
+                        )
+                        result_msg = (
+                            f"Rezultat din sistem: pacientul are următoarele programări viitoare:\n{appt_lines}\n"
+                            "Informează pacientul politicos și întreabă dacă dorește să modifice ceva. "
+                            "Nu include niciun bloc JSON în răspuns."
+                        )
+                    else:
+                        result_msg = (
+                            "Rezultat din sistem: pacientul nu are nicio programare viitoare înregistrată. "
+                            "Informează pacientul și întreabă dacă dorește să programeze o consultație. "
+                            "Nu include niciun bloc JSON în răspuns."
+                        )
+                    print(f"[main] List: {result_msg}", flush=True)
+                    messages.append({"role": "system", "content": result_msg})
+                    list_response = await run_in_threadpool(
+                        ollama.chat,
+                        model="hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M",
+                        messages=messages,
+                        options={"temperature": 0.3, "num_ctx": 8192},
+                    )
+                    ai_reply = list_response["message"]["content"].strip()
+                    if not ai_reply:
+                        ai_reply = (
+                            "Aveți următoarele programări viitoare: " + ", ".join(a["summary"] for a in appts)
+                            if appts else "Nu aveți nicio programare viitoare înregistrată."
+                        )
+                    clean_text = ai_reply
+                    print(f"AI [{session_id}] (list):", ai_reply, flush=True)
 
             except Exception as e:
                 print(f"[main] Eroare la procesare programare: {e}", flush=True)
