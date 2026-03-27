@@ -1,28 +1,40 @@
 import os
 import io
-import uuid
 import asyncio
 import json
+import re
+import struct
 from datetime import date as date_type, datetime as dt, timedelta
-from urllib.parse import quote, unquote
+from urllib.parse import quote
+
 import torch  # must be imported before faster_whisper to init CUDA lib paths
 import redis
 import ollama
 import edge_tts
 
-from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from fastapi.concurrency import run_in_threadpool
 from faster_whisper import WhisperModel
+from ollama import AsyncClient
 
 from app.appointment_parser import extract_appointment
-from app.calendar_service import create_appointment, check_conflict, cancel_appointment, get_appointments, list_appointments
+from app.calendar_service import (
+    create_appointment, check_conflict, cancel_appointment,
+    get_appointments, list_appointments,
+)
 
 app = FastAPI()
 stt_model = None
+ollama_async = AsyncClient()
+
+MODEL = "hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M"
+VOICE = "ro-RO-AlinaNeural"
+SENTENCE_END = re.compile(r'(?<=[.!?])\s')
 
 # --- CONECTARE REDIS ---
 redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+
 
 def build_system_prompt() -> str:
     today = date_type.today()
@@ -105,11 +117,13 @@ REGULI STRICTE — TREBUIE RESPECTATE ÎNTOTDEAUNA:
 Exemplu corect când pacientul întreabă dacă are o programare:
 "Verificăm imediat în sistem..."
 ```json
-{{"action": "check", "date": "{(today + timedelta(days=7)).strftime('%Y-%m-%d')}", "time": "15:00"}}
+{{"action": "check", "date": "{(date_type.today() + timedelta(days=7)).strftime('%Y-%m-%d')}", "time": "15:00"}}
 ```
 """
 
+
 SYSTEM_PROMPT = build_system_prompt()
+
 
 @app.on_event("startup")
 async def load_models():
@@ -121,285 +135,269 @@ async def load_models():
     print("Warming up Ollama (loading model into VRAM)...", flush=True)
     await run_in_threadpool(
         ollama.chat,
-        model="hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M",
+        model=MODEL,
         messages=[{"role": "user", "content": "hi"}],
         options={"temperature": 0, "num_ctx": 8192, "num_predict": 1},
     )
     print("Ollama ready.", flush=True)
 
+
 def get_stt_model():
     return stt_model
 
-@app.post("/voice")
-async def voice_endpoint(
-    background_tasks: BackgroundTasks, 
-    file: UploadFile = File(...),
-    session_id: str = Form(...) # numarul de telefon al pacientului (ex: +40721000000)
-):
-    unique_id = uuid.uuid4().hex
-    output_path = f"out_{unique_id}.mp3"
 
+async def tts_chunk(text: str) -> bytes:
+    """Convert text to a length-prefixed MP3 chunk. Returns b'' if text is empty."""
+    text = text.strip()
+    if not text:
+        return b""
+    communicate = edge_tts.Communicate(text, VOICE)
+    mp3_data = b""
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            mp3_data += chunk["data"]
+    if not mp3_data:
+        return b""
+    return struct.pack('<I', len(mp3_data)) + mp3_data
+
+
+async def llm_call(messages: list) -> str:
+    """Non-streaming LLM call used for action follow-up responses."""
+    response = await ollama_async.chat(
+        model=MODEL,
+        messages=messages,
+        options={"temperature": 0.3, "num_ctx": 8192},
+    )
+    return response["message"]["content"].strip()
+
+
+async def handle_calendar_action(
+    appointment: dict, messages: list, session_id: str
+) -> str | None:
+    """
+    Execute a calendar action and return the text to speak, or None if
+    the pre-JSON text already covers the response (schedule/cancel success).
+    """
+    action = appointment.get("action")
     try:
-        # read uploaded audio into memory — no disk write needed
-        content = await file.read()
-        audio_buffer = io.BytesIO(content)
+        if action == "schedule":
+            appt_date = dt.strptime(appointment["date"], "%Y-%m-%d").date()
+            if appt_date < date_type.today():
+                print(f"[main] Data in trecut: {appointment['date']}", flush=True)
+                messages.append({"role": "system", "content": (
+                    f"Data {appointment['date']} este în trecut. "
+                    "Informează pacientul că nu se pot face programări pentru date trecute "
+                    "și roagă-l să aleagă o dată viitoare. Nu include niciun bloc JSON în răspuns."
+                )})
+                reply = await llm_call(messages)
+                return reply or "Nu se pot face programări pentru date trecute. Vă rog să alegeți o dată viitoare."
 
-        # STT (Audio -> Text)
-        segments, _ = await run_in_threadpool(
-            get_stt_model().transcribe, audio_buffer, language="ro", vad_filter=True
-        )
-        user_text = " ".join([s.text for s in segments]).strip()
-        print(f"User [{session_id}]:", user_text, flush=True)
+            conflict = await run_in_threadpool(
+                check_conflict, appointment["date"], appointment["time"]
+            )
+            if conflict:
+                print(f"[main] Conflict: {appointment['date']} {appointment['time']}", flush=True)
+                messages.append({"role": "system", "content": (
+                    f"Intervalul {appointment['time']} din {appointment['date']} este deja ocupat. "
+                    "Informează pacientul politicos că acel interval nu este disponibil și propune-i "
+                    "să aleagă o altă oră sau zi. Nu include niciun bloc JSON în răspuns."
+                )})
+                reply = await llm_call(messages)
+                return reply or (
+                    f"Îmi pare rău, intervalul {appointment['time']} din {appointment['date']} "
+                    "este ocupat. Doriți să alegeți altă oră?"
+                )
+            event_link = await run_in_threadpool(
+                create_appointment,
+                appointment["name"], appointment["date"], appointment["time"], session_id,
+            )
+            print(f"[main] Programare creata: {event_link}", flush=True)
+            return None  # pre-JSON confirmation text was already streamed
 
-        # recuperam istoricul din Redis
-        history_json = redis_client.get(session_id)
+        elif action == "cancel":
+            appt_date = dt.strptime(appointment["date"], "%Y-%m-%d").date()
+            if appt_date < date_type.today():
+                return (
+                    f"Data de {appointment['date']} este în trecut. "
+                    "Nu există programări active pentru date trecute."
+                )
+            deleted = await run_in_threadpool(
+                cancel_appointment, appointment["date"], appointment["time"]
+            )
+            if not deleted:
+                print(f"[main] Anulare: nimic gasit pentru {appointment['date']} {appointment['time']}", flush=True)
+                messages.append({"role": "system", "content": (
+                    f"Nu a fost găsită nicio programare pe data de {appointment['date']} "
+                    f"la ora {appointment['time']}. "
+                    "Informează pacientul politicos și întreabă dacă dorește să verifice altă dată sau oră. "
+                    "Nu include niciun bloc JSON în răspuns."
+                )})
+                reply = await llm_call(messages)
+                return reply or (
+                    f"Nu am găsit nicio programare pe {appointment['date']} la {appointment['time']}."
+                )
+            print(f"[main] Programare anulata: {appointment['date']} {appointment['time']}", flush=True)
+            return None  # pre-JSON confirmation text was already streamed
 
-        if history_json:
-            messages = json.loads(history_json)
-            print(f"[redis] Loaded {len(messages)} messages for phone {session_id}", flush=True)
-        else:
-            messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-            print(f"[redis] New session for phone {session_id}", flush=True)
+        elif action == "check":
+            appt_date = dt.strptime(appointment["date"], "%Y-%m-%d").date()
+            if appt_date < date_type.today():
+                return (
+                    f"Data de {appointment['date']} este în trecut. "
+                    "Puteți verifica doar programări viitoare."
+                )
+            events = await run_in_threadpool(
+                get_appointments, appointment["date"], appointment["time"]
+            )
+            if events:
+                result_msg = (
+                    f"Rezultat verificare din sistem: există o programare pe {appointment['date']} "
+                    f"la ora {appointment['time']}: {', '.join(events)}. "
+                    "Informează pacientul și întreabă dacă dorește să o anuleze sau dacă mai are alte întrebări. "
+                    "Nu include niciun bloc JSON în răspuns."
+                )
+            else:
+                result_msg = (
+                    f"Rezultat verificare din sistem: nu există nicio programare pe {appointment['date']} "
+                    f"la ora {appointment['time']}. "
+                    "Informează pacientul și întreabă dacă dorește să programeze o consultație. "
+                    "Nu include niciun bloc JSON în răspuns."
+                )
+            print(f"[main] Check result: {result_msg}", flush=True)
+            messages.append({"role": "system", "content": result_msg})
+            reply = await llm_call(messages)
+            return reply or ("Există o programare." if events else "Nu există nicio programare.")
 
-        # adaugam ce a spus clientul ACUM
-        messages.append({"role": "user", "content": user_text})
-
-        # LLM
-        response = await run_in_threadpool(
-            ollama.chat,
-            model="hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M",
-            messages=messages,
-            options={"temperature": 0.3, "num_ctx": 8192}
-        )
-
-        ai_reply = response["message"]["content"].strip()
-        print(f"AI [{session_id}]:", ai_reply, flush=True)
-
-        # --- EXTRAGE PROGRAMAREA DIN RASPUNS (daca exista) ---
-        clean_text, appointment = extract_appointment(ai_reply)
-
-        if appointment:
-            action = appointment.get("action")
-            try:
-                if action == "schedule":
-                    # Reject past dates
-                    appt_date = dt.strptime(appointment["date"], "%Y-%m-%d").date()
-                    if appt_date < date_type.today():
-                        print(f"[main] Data in trecut: {appointment['date']}", flush=True)
-                        messages.append({
-                            "role": "system",
-                            "content": (
-                                f"Data {appointment['date']} este în trecut. "
-                                "Informează pacientul că nu se pot face programări pentru date trecute "
-                                "și roagă-l să aleagă o dată viitoare. Nu include niciun bloc JSON în răspuns."
-                            ),
-                        })
-                        past_response = await run_in_threadpool(
-                            ollama.chat,
-                            model="hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M",
-                            messages=messages,
-                            options={"temperature": 0.3, "num_ctx": 8192},
-                        )
-                        ai_reply = past_response["message"]["content"].strip()
-                        if not ai_reply:
-                            ai_reply = "Nu se pot face programări pentru date trecute. Vă rog să alegeți o dată viitoare."
-                        clean_text = ai_reply
-                        print(f"AI [{session_id}] (past-date):", ai_reply, flush=True)
-                    else:
-                        conflict = await run_in_threadpool(
-                            check_conflict,
-                            appointment["date"],
-                            appointment["time"],
-                        )
-                        if conflict:
-                            print(f"[main] Conflict detectat pentru {appointment['date']} {appointment['time']}", flush=True)
-                            messages.append({
-                                "role": "system",
-                                "content": (
-                                    f"Intervalul {appointment['time']} din {appointment['date']} este deja ocupat. "
-                                    "Informează pacientul politicos că acel interval nu este disponibil și propune-i "
-                                    "să aleagă o altă oră sau zi. Nu include niciun bloc JSON în răspuns."
-                                ),
-                            })
-                            conflict_response = await run_in_threadpool(
-                                ollama.chat,
-                                model="hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M",
-                                messages=messages,
-                                options={"temperature": 0.3, "num_ctx": 8192},
-                            )
-                            ai_reply = conflict_response["message"]["content"].strip()
-                            if not ai_reply:
-                                ai_reply = (
-                                    f"Îmi pare rău, intervalul de la ora {appointment['time']} "
-                                    f"din data de {appointment['date']} este deja ocupat. "
-                                    "Doriți să alegeți o altă oră sau zi?"
-                                )
-                            clean_text = ai_reply
-                            print(f"AI [{session_id}] (conflict):", ai_reply, flush=True)
-                        else:
-                            event_link = await run_in_threadpool(
-                                create_appointment,
-                                appointment["name"],
-                                appointment["date"],
-                                appointment["time"],
-                                session_id,
-                            )
-                            print(f"[main] Programare creata: {event_link}", flush=True)
-
-                elif action == "cancel":
-                    appt_date = dt.strptime(appointment["date"], "%Y-%m-%d").date()
-                    if appt_date < date_type.today():
-                        print(f"[main] Cancel ignorat — data in trecut: {appointment['date']}", flush=True)
-                        clean_text = f"Data de {appointment['date']} este în trecut. Nu există programări active pentru date trecute."
-                        messages.append({"role": "assistant", "content": clean_text})
-                        redis_client.setex(session_id, 600, json.dumps(messages))
-                        communicate = edge_tts.Communicate(clean_text, "ro-RO-AlinaNeural")
-                        await communicate.save(output_path)
-                        background_tasks.add_task(cleanup_output, output_path)
-                        return FileResponse(output_path, media_type="audio/mpeg", headers={"X-AI-Text": quote(clean_text)})
-                    deleted = await run_in_threadpool(
-                        cancel_appointment,
-                        appointment["date"],
-                        appointment["time"],
-                    )
-                    if not deleted:
-                        print(f"[main] Anulare: nicio programare gasita pentru {appointment['date']} {appointment['time']}", flush=True)
-                        messages.append({
-                            "role": "system",
-                            "content": (
-                                f"Nu a fost găsită nicio programare pe data de {appointment['date']} "
-                                f"la ora {appointment['time']}. "
-                                "Informează pacientul politicos și întreabă dacă dorește să verifice altă dată sau oră. "
-                                "Nu include niciun bloc JSON în răspuns."
-                            ),
-                        })
-                        not_found_response = await run_in_threadpool(
-                            ollama.chat,
-                            model="hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M",
-                            messages=messages,
-                            options={"temperature": 0.3, "num_ctx": 8192},
-                        )
-                        ai_reply = not_found_response["message"]["content"].strip()
-                        if not ai_reply:
-                            ai_reply = (
-                                f"Nu am găsit nicio programare pe data de {appointment['date']} "
-                                f"la ora {appointment['time']}. "
-                                "Doriți să verificați o altă dată sau oră?"
-                            )
-                        clean_text = ai_reply
-                        print(f"AI [{session_id}] (cancel-not-found):", ai_reply, flush=True)
-                    else:
-                        print(f"[main] Programare anulata: {appointment['date']} {appointment['time']}", flush=True)
-
-                elif action == "check":
-                    appt_date = dt.strptime(appointment["date"], "%Y-%m-%d").date()
-                    if appt_date < date_type.today():
-                        print(f"[main] Check ignorat — data in trecut: {appointment['date']}", flush=True)
-                        clean_text = f"Data de {appointment['date']} este în trecut. Puteți verifica doar programări viitoare."
-                        messages.append({"role": "assistant", "content": clean_text})
-                        redis_client.setex(session_id, 600, json.dumps(messages))
-                        communicate = edge_tts.Communicate(clean_text, "ro-RO-AlinaNeural")
-                        await communicate.save(output_path)
-                        background_tasks.add_task(cleanup_output, output_path)
-                        return FileResponse(output_path, media_type="audio/mpeg", headers={"X-AI-Text": quote(clean_text)})
-                    events = await run_in_threadpool(
-                        get_appointments,
-                        appointment["date"],
-                        appointment["time"],
-                    )
-                    if events:
-                        result_msg = (
-                            f"Rezultat verificare din sistem: există o programare pe {appointment['date']} "
-                            f"la ora {appointment['time']}: {', '.join(events)}. "
-                            "Informează pacientul și întreabă dacă dorește să o anuleze sau dacă mai are alte întrebări. "
-                            "Nu include niciun bloc JSON în răspuns."
-                        )
-                    else:
-                        result_msg = (
-                            f"Rezultat verificare din sistem: nu există nicio programare pe {appointment['date']} "
-                            f"la ora {appointment['time']}. "
-                            "Informează pacientul și întreabă dacă dorește să programeze o consultație. "
-                            "Nu include niciun bloc JSON în răspuns."
-                        )
-                    print(f"[main] Check: {result_msg}", flush=True)
-                    messages.append({"role": "system", "content": result_msg})
-                    check_response = await run_in_threadpool(
-                        ollama.chat,
-                        model="hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M",
-                        messages=messages,
-                        options={"temperature": 0.3, "num_ctx": 8192},
-                    )
-                    ai_reply = check_response["message"]["content"].strip()
-                    if not ai_reply:
-                        ai_reply = (
-                            f"Am verificat în sistem. "
-                            + (f"Există o programare pe {appointment['date']} la ora {appointment['time']}."
-                               if events else
-                               f"Nu există nicio programare pe {appointment['date']} la ora {appointment['time']}.")
-                        )
-                    clean_text = ai_reply
-                    print(f"AI [{session_id}] (check):", ai_reply, flush=True)
-
-                elif action == "list":
-                    appts = await run_in_threadpool(list_appointments, session_id)
-                    if appts:
-                        appt_lines = "\n".join(
-                            f"- {a['summary']} la {a['start']}" for a in appts
-                        )
-                        result_msg = (
-                            f"Rezultat din sistem: pacientul are următoarele programări viitoare:\n{appt_lines}\n"
-                            "Informează pacientul politicos și întreabă dacă dorește să modifice ceva. "
-                            "Nu include niciun bloc JSON în răspuns."
-                        )
-                    else:
-                        result_msg = (
-                            "Rezultat din sistem: pacientul nu are nicio programare viitoare înregistrată. "
-                            "Informează pacientul și întreabă dacă dorește să programeze o consultație. "
-                            "Nu include niciun bloc JSON în răspuns."
-                        )
-                    print(f"[main] List: {result_msg}", flush=True)
-                    messages.append({"role": "system", "content": result_msg})
-                    list_response = await run_in_threadpool(
-                        ollama.chat,
-                        model="hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M",
-                        messages=messages,
-                        options={"temperature": 0.3, "num_ctx": 8192},
-                    )
-                    ai_reply = list_response["message"]["content"].strip()
-                    if not ai_reply:
-                        ai_reply = (
-                            "Aveți următoarele programări viitoare: " + ", ".join(a["summary"] for a in appts)
-                            if appts else "Nu aveți nicio programare viitoare înregistrată."
-                        )
-                    clean_text = ai_reply
-                    print(f"AI [{session_id}] (list):", ai_reply, flush=True)
-
-            except Exception as e:
-                print(f"[main] Eroare la procesare programare: {e}", flush=True)
-
-        # MEMORIA: Salvam istoricul actualizat in Redis ---
-        # Salvam raspunsul complet (cu JSON) in istoric, dar trimitem doar textul curat la TTS
-        messages.append({"role": "assistant", "content": ai_reply})
-
-        # Salvam in Redis cu o durata de viața de 600 secunde (10 minute)
-        redis_client.setex(session_id, 600, json.dumps(messages))
-
-        # TTS (Text -> Audio) — folosim textul fara blocul JSON
-        communicate = edge_tts.Communicate(clean_text, "ro-RO-AlinaNeural")
-        await communicate.save(output_path)
-
-        background_tasks.add_task(cleanup_output, output_path)
-
-        return FileResponse(
-            output_path,
-            media_type="audio/mpeg",
-            headers={"X-AI-Text": quote(clean_text)},
-        )
+        elif action == "list":
+            appts = await run_in_threadpool(list_appointments, session_id)
+            if appts:
+                appt_lines = "\n".join(f"- {a['summary']} la {a['start']}" for a in appts)
+                result_msg = (
+                    f"Rezultat din sistem: pacientul are următoarele programări viitoare:\n{appt_lines}\n"
+                    "Informează pacientul politicos și întreabă dacă dorește să modifice ceva. "
+                    "Nu include niciun bloc JSON în răspuns."
+                )
+            else:
+                result_msg = (
+                    "Rezultat din sistem: pacientul nu are nicio programare viitoare înregistrată. "
+                    "Informează pacientul și întreabă dacă dorește să programeze o consultație. "
+                    "Nu include niciun bloc JSON în răspuns."
+                )
+            print(f"[main] List result: {result_msg}", flush=True)
+            messages.append({"role": "system", "content": result_msg})
+            reply = await llm_call(messages)
+            return reply or (
+                "Aveți programările: ..." if appts else "Nu aveți nicio programare viitoare înregistrată."
+            )
 
     except Exception as e:
-        return {"error": str(e)}
+        print(f"[main] Eroare la acțiune: {e}", flush=True)
 
-async def cleanup_output(path):
-    await asyncio.sleep(2)
-    if os.path.exists(path):
-        os.remove(path)
+    return None
+
+
+async def voice_stream(session_id: str, audio_buffer: io.BytesIO):
+    """
+    Main pipeline as an async generator:
+      STT → streaming LLM → per-sentence TTS → yield length-prefixed MP3 chunks
+
+    Protocol:
+      Each chunk  = 4-byte little-endian uint32 (length) + <length> bytes of MP3
+      End marker  = 4 zero bytes
+    """
+
+    # --- STT ---
+    segments, _ = await run_in_threadpool(
+        get_stt_model().transcribe, audio_buffer, language="ro", vad_filter=True
+    )
+    user_text = " ".join([s.text for s in segments]).strip()
+    print(f"User [{session_id}]: {user_text}", flush=True)
+
+    # --- Load session history ---
+    history_json = redis_client.get(session_id)
+    if history_json:
+        messages = json.loads(history_json)
+        print(f"[redis] Loaded {len(messages)} messages for {session_id}", flush=True)
+    else:
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        print(f"[redis] New session for {session_id}", flush=True)
+    messages.append({"role": "user", "content": user_text})
+
+    # --- Stream LLM, TTS each sentence as it completes ---
+    full_response = ""
+    sentence_buffer = ""
+    json_detected = False
+
+    async for chunk in await ollama_async.chat(
+        model=MODEL,
+        messages=messages,
+        stream=True,
+        options={"temperature": 0.3, "num_ctx": 8192},
+    ):
+        token = chunk["message"]["content"]
+        full_response += token
+
+        if json_detected:
+            continue  # keep consuming to get the full response; no more TTS
+
+        # Detect start of JSON action block
+        if "```json" in full_response or "```\n{" in full_response:
+            json_detected = True
+            # Speak whatever was buffered before the backticks
+            pre_json = sentence_buffer.split("```")[0].strip()
+            audio = await tts_chunk(pre_json)
+            if audio:
+                yield audio
+            sentence_buffer = ""
+            continue
+
+        sentence_buffer += token
+
+        # Yield a chunk whenever a sentence boundary is reached
+        m = SENTENCE_END.search(sentence_buffer)
+        if m:
+            to_speak = sentence_buffer[:m.end()].strip()
+            sentence_buffer = sentence_buffer[m.end():]
+            audio = await tts_chunk(to_speak)
+            if audio:
+                yield audio
+
+    # Yield any remaining text (no JSON block in this turn)
+    if not json_detected and sentence_buffer.strip():
+        audio = await tts_chunk(sentence_buffer.strip())
+        if audio:
+            yield audio
+
+    ai_reply = full_response.strip()
+    print(f"AI [{session_id}]: {ai_reply[:120]}", flush=True)
+
+    # --- Handle calendar action if present ---
+    _, appointment = extract_appointment(ai_reply)
+    if appointment:
+        action_text = await handle_calendar_action(appointment, messages, session_id)
+        if action_text:
+            # Stream the action response sentence by sentence
+            for sentence in [s.strip() for s in SENTENCE_END.split(action_text) if s.strip()]:
+                audio = await tts_chunk(sentence)
+                if audio:
+                    yield audio
+
+    # --- Persist conversation to Redis ---
+    messages.append({"role": "assistant", "content": ai_reply})
+    redis_client.setex(session_id, 600, json.dumps(messages))
+
+    # End-of-stream marker
+    yield struct.pack('<I', 0)
+
+
+@app.post("/voice")
+async def voice_endpoint(
+    file: UploadFile = File(...),
+    session_id: str = Form(...),  # patient phone number (e.g. +40721000000)
+):
+    content = await file.read()
+    audio_buffer = io.BytesIO(content)
+    return StreamingResponse(
+        voice_stream(session_id, audio_buffer),
+        media_type="application/octet-stream",
+    )
