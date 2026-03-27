@@ -1,4 +1,5 @@
 import os
+import io
 import uuid
 import asyncio
 import json
@@ -113,8 +114,8 @@ SYSTEM_PROMPT = build_system_prompt()
 @app.on_event("startup")
 async def load_models():
     global stt_model
-    print("Loading Whisper medium...", flush=True)
-    stt_model = WhisperModel("medium", device="cuda", compute_type="float16")
+    print("Loading Whisper small...", flush=True)
+    stt_model = WhisperModel("small", device="cuda", compute_type="float16")
     print("Whisper ready.", flush=True)
 
     print("Warming up Ollama (loading model into VRAM)...", flush=True)
@@ -136,18 +137,16 @@ async def voice_endpoint(
     session_id: str = Form(...) # numarul de telefon al pacientului (ex: +40721000000)
 ):
     unique_id = uuid.uuid4().hex
-    input_path = f"in_{unique_id}.wav"
     output_path = f"out_{unique_id}.mp3"
 
     try:
-        # salvam fisierul audio primit
+        # read uploaded audio into memory — no disk write needed
         content = await file.read()
-        with open(input_path, "wb") as f:
-            f.write(content)
+        audio_buffer = io.BytesIO(content)
 
-        # 2. STT (Audio -> Text)
+        # STT (Audio -> Text)
         segments, _ = await run_in_threadpool(
-            get_stt_model().transcribe, input_path, language="ro"
+            get_stt_model().transcribe, audio_buffer, language="ro"
         )
         user_text = " ".join([s.text for s in segments]).strip()
         print(f"User [{session_id}]:", user_text, flush=True)
@@ -256,7 +255,7 @@ async def voice_endpoint(
                         redis_client.setex(session_id, 600, json.dumps(messages))
                         communicate = edge_tts.Communicate(clean_text, "ro-RO-AlinaNeural")
                         await communicate.save(output_path)
-                        background_tasks.add_task(cleanup_files, input_path, output_path)
+                        background_tasks.add_task(cleanup_output, output_path)
                         return FileResponse(output_path, media_type="audio/mpeg", headers={"X-AI-Text": quote(clean_text)})
                     deleted = await run_in_threadpool(
                         cancel_appointment,
@@ -301,7 +300,7 @@ async def voice_endpoint(
                         redis_client.setex(session_id, 600, json.dumps(messages))
                         communicate = edge_tts.Communicate(clean_text, "ro-RO-AlinaNeural")
                         await communicate.save(output_path)
-                        background_tasks.add_task(cleanup_files, input_path, output_path)
+                        background_tasks.add_task(cleanup_output, output_path)
                         return FileResponse(output_path, media_type="audio/mpeg", headers={"X-AI-Text": quote(clean_text)})
                     events = await run_in_threadpool(
                         get_appointments,
@@ -389,7 +388,7 @@ async def voice_endpoint(
         communicate = edge_tts.Communicate(clean_text, "ro-RO-AlinaNeural")
         await communicate.save(output_path)
 
-        background_tasks.add_task(cleanup_files, input_path, output_path)
+        background_tasks.add_task(cleanup_output, output_path)
 
         return FileResponse(
             output_path,
@@ -400,9 +399,7 @@ async def voice_endpoint(
     except Exception as e:
         return {"error": str(e)}
 
-async def cleanup_files(i, o):
+async def cleanup_output(path):
     await asyncio.sleep(2)
-    if os.path.exists(i):
-        os.remove(i)
-    if os.path.exists(o):
-        os.remove(o)
+    if os.path.exists(path):
+        os.remove(path)
