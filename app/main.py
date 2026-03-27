@@ -146,7 +146,7 @@ async def voice_endpoint(
 
         # STT (Audio -> Text)
         segments, _ = await run_in_threadpool(
-            get_stt_model().transcribe, audio_buffer, language="ro"
+            get_stt_model().transcribe, audio_buffer, language="ro", vad_filter=True
         )
         user_text = " ".join([s.text for s in segments]).strip()
         print(f"User [{session_id}]:", user_text, flush=True)
