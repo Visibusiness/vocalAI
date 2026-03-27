@@ -114,8 +114,8 @@ SYSTEM_PROMPT = build_system_prompt()
 @app.on_event("startup")
 async def load_models():
     global stt_model
-    print("Loading Whisper small...", flush=True)
-    stt_model = WhisperModel("small", device="cuda", compute_type="float16")
+    print("Loading Whisper large-v3-turbo...", flush=True)
+    stt_model = WhisperModel("large-v3-turbo", device="cuda", compute_type="float16")
     print("Whisper ready.", flush=True)
 
     print("Warming up Ollama (loading model into VRAM)...", flush=True)
