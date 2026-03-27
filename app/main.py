@@ -369,7 +369,7 @@ async def voice_stream(session_id: str, audio_buffer: io.BytesIO):
             yield audio
 
     ai_reply = full_response.strip()
-    print(f"AI [{session_id}]: {ai_reply[:120]}", flush=True)
+    print(f"AI [{session_id}]: {ai_reply}", flush=True)
 
     # --- Handle calendar action if present ---
     _, appointment = extract_appointment(ai_reply)
