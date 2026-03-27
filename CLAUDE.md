@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 VocalAI is a voice-based conversational AI receptionist ("TestRec") for a clinic called TestClinic. It accepts a WAV audio file, transcribes it, passes it through an LLM, and returns an MP3 response. All conversation is in Romanian.
 
-**Pipeline:** WAV → Faster-Whisper (STT) → Redis (history) → Ollama/Gemma-3-27B (LLM) → Google Calendar API → Edge-TTS → MP3
+**Pipeline:** WAV → Faster-Whisper large-v3-turbo (STT) → Redis (history) → Ollama/Gemma-3-27B (LLM) → Google Calendar API → Edge-TTS → streaming MP3
 
 ## Running the Server
 
@@ -55,12 +55,14 @@ curl -X POST http://localhost:8000/voice \
 ### `app/main.py` — FastAPI server
 
 - Whisper and Ollama are pre-loaded at startup to eliminate cold start on first request
-- The only endpoint is `POST /voice`: receives `file` (WAV) + `session_id` (form fields)
+- The only endpoint is `POST /voice`: receives `file` (WAV) + `session_id` (form fields), returns a `StreamingResponse`
 - `session_id` is the patient's phone number when using `--phone` flag, otherwise a random ID
 - Conversation history stored in Redis under `session_id` as JSON array of `{role, content}` messages with 600s TTL
-- Blocking operations (Whisper, Ollama) run via `run_in_threadpool` to avoid blocking the async event loop
-- After LLM reply, `extract_appointment()` parses a JSON action block; the server routes to the appropriate handler
-- Temp files (`in_<uuid>.wav`, `out_<uuid>.mp3`) deleted by background task 2 seconds after response
+- WAV bytes are passed directly to Whisper via `io.BytesIO` — no disk write
+- LLM streams tokens via `ollama.AsyncClient`; complete sentences are sent to Edge-TTS as they arrive
+- Audio is returned as a stream of length-prefixed MP3 chunks (4-byte LE uint32 + MP3 bytes); `\x00\x00\x00\x00` = end
+- After LLM reply, `extract_appointment()` parses a JSON action block; `handle_calendar_action()` routes to the appropriate handler
+- No temp files — all audio stays in memory end-to-end
 
 ### JSON action system
 
@@ -81,9 +83,16 @@ Extracts and validates the JSON block from LLM replies. Rejects blocks with `nul
 
 Google Calendar service account integration. Functions: `create_appointment`, `check_conflict`, `cancel_appointment`, `get_appointments`, `list_appointments`.
 
+### STT model
+
+- Model: `large-v3-turbo` via faster-whisper, `device="cuda"`, `compute_type="float16"`, `vad_filter=True`
+- `large-v3-turbo` = same encoder as large-v3 (better than medium for Romanian), pruned decoder → ~2x faster than medium, ~1.6 GB VRAM
+- `vad_filter=True` prevents hallucinations on silence/noise (required for large-v3 based models)
+
 ### LLM model
 
 - Model: `hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M` via Ollama, `temperature=0.3`, `num_ctx=8192`
+- Streamed via `ollama.AsyncClient` — tokens arrive as async generator, no blocking
 - System prompt built dynamically by `build_system_prompt()` — injects today's date so AI knows the current year
 
 ### Key runtime dependencies
@@ -97,7 +106,11 @@ Google Calendar service account integration. Functions: `create_appointment`, `c
 ## Clients
 
 - **`client.py`** — mic-based client; `--phone +40xxx` uses phone as session ID, `--new` resets session
+  - Uses `httpx.stream()` + length-prefixed protocol to receive and play audio sentence by sentence
+  - Playback queue + background thread: next sentence decoded while current one plays (no gap)
+  - Session ID persisted to `.session_id` file across runs
 - **`test_client.py`** — text-based test client; `--text "..."` converts text to WAV via Edge-TTS and sends to server
+  - Note: `test_client.py` still uses the old non-streaming response format and needs updating
 
 ## Changing the AI Persona or Voice
 
@@ -256,16 +269,24 @@ That's it. Steps 1 and 2 never need to be repeated — only steps 3 and 4 when m
 
 ## Next Steps
 
-- [x] **Fix Google Calendar 404** — calendar shared with service account, booking confirmed working ✅
-- [x] **Conflict checking** — checks for existing events before booking, informs patient if slot is taken ✅
-- [x] **Date parsing robustness** — system prompt enforces current year, handles "mâine"/"azi" etc. ✅
-- [x] **Phone number as session ID** — `--phone` arg on both clients; stored in calendar event description ✅
-- [x] **List appointments action** — patient can ask "ce programare am?" and system queries calendar by phone ✅
-- [x] **Confirmation gate fixed** — AI now asks confirmation in a separate turn before sending schedule/cancel JSON ✅
-- [ ] **Confirmation SMS/email** — after booking, notify the patient via Twilio/SendGrid
-- [ ] **Twilio integration** — replace manual `--phone` arg with real inbound call handler
-- [ ] **Docker update** — add `GOOGLE_CALENDAR_ID` env var and mount `credentials.json` into container
-- [ ] **LLM reliability** — stress-test edge cases (interruptions mid-booking, ambiguous confirmations)
+- [x] **Fix Google Calendar 404** ✅
+- [x] **Conflict checking** ✅
+- [x] **Date parsing robustness** ✅
+- [x] **Phone number as session ID** ✅
+- [x] **List appointments action** ✅
+- [x] **Confirmation gate fixed** ✅
+- [x] **Streaming LLM → TTS pipeline** ✅ — first word heard ~2s after speaking
+- [x] **Skip disk write for STT** ✅ — WAV bytes passed directly via io.BytesIO
+- [x] **Whisper large-v3-turbo** ✅ — faster + more accurate than medium for Romanian
+- [ ] **Twilio integration** — replace `client.py` with real inbound phone call handler (highest priority — makes it a real product)
+- [ ] **SMS confirmation** — after booking, send patient a confirmation SMS via Twilio (trivial once Twilio is in)
+- [ ] **PostgreSQL database** — replace Redis with persistent DB for call history, appointment audit trail, analytics
+- [ ] **Multi-doctor scheduling** — each doctor has their own calendar; route by specialty or availability
+- [ ] **Full-day calendar scan** — "am ceva pe 25 martie?" currently sends 00:00 and returns empty; needs day-range query
+- [ ] **Docker update** — mount `credentials.json` + `GOOGLE_CALENDAR_ID` env var in Dockerfile
+- [ ] **Update `test_client.py`** — still uses old non-streaming response format, needs updating to length-prefixed protocol
+- [ ] **Fine-tune STT** — train Whisper on Romanian medical vocabulary (worth doing once real call data exists)
+- [ ] **Fine-tune LLM** — train on real receptionist conversations for more consistent booking flow
 
 ---
 
@@ -299,3 +320,36 @@ That's it. Steps 1 and 2 never need to be repeated — only steps 3 and 4 when m
 3. Server calls `list_appointments(session_id)` — queries Google Calendar with `q=<phone>`
 4. Results injected back as system message → LLM replies naturally
 5. Clean text returned as audio
+
+---
+
+## Session Summary — 2026-03-27 (performance & streaming)
+
+### Changes made
+
+| Change | Detail |
+|---|---|
+| **Skip disk write for STT** | WAV bytes passed directly to Whisper via `io.BytesIO` — no temp file written/read/deleted |
+| **Whisper `medium` → `large-v3-turbo`** | ~2x faster than medium, better Romanian accuracy (large-v3 encoder), ~1.6 GB VRAM |
+| **`vad_filter=True`** | Required for large-v3 based models — prevents hallucinations on silence and background noise |
+| **Streaming LLM → TTS pipeline** | LLM tokens streamed via `ollama.AsyncClient`; each complete sentence sent to Edge-TTS immediately; audio chunks streamed to client as they're ready |
+| **Length-prefixed streaming protocol** | Response is `application/octet-stream`: 4-byte LE uint32 length + MP3 bytes per sentence; `\x00\x00\x00\x00` = end of stream |
+| **No more temp output files** | Edge-TTS audio goes directly to bytes in memory; `cleanup_output()` removed entirely |
+| **`handle_calendar_action()` extracted** | Action handling logic moved to a dedicated async function; `llm_call()` helper for non-streaming follow-up LLM calls |
+| **`client.py` streaming playback** | Uses `httpx.stream()` + `iter_audio_chunks()` to parse protocol; playback queue + background thread plays each sentence immediately, next decoded while current plays |
+
+### Latency improvement
+
+- **Before:** wait for full LLM response (~8–15s) + full TTS (~2–3s) → first word heard after ~15s
+- **After:** first sentence from LLM (~1–2s) + TTS that sentence (~300ms) → first word heard after ~2s
+
+### Key implementation details
+
+- `SENTENCE_END = re.compile(r'(?<=[.!?])\s')` — splits on sentence boundaries mid-stream
+- JSON block detection: `"```json" in full_response` — when detected, remaining tokens consumed silently, pre-JSON text already spoken
+- Action responses (check/list/conflict/cancel-not-found) also streamed sentence by sentence after the calendar API call
+- `ollama.AsyncClient` used for both streaming and non-streaming calls (no `run_in_threadpool` for LLM)
+
+### Known issues
+
+- `test_client.py` still uses the old `FileResponse` format — it will break against the new streaming endpoint and needs updating
