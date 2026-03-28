@@ -35,6 +35,48 @@ SENTENCE_END = re.compile(r'(?<=[.!?])\s')
 # --- CONECTARE REDIS ---
 redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
 
+# --- ORE DE PROGRAM ---
+# weekday() returns 0=Monday … 6=Sunday; None means closed
+BUSINESS_HOURS: dict[int, tuple[str, str] | None] = {
+    0: ("09:00", "17:00"),
+    1: ("09:00", "17:00"),
+    2: ("09:00", "17:00"),
+    3: ("09:00", "17:00"),
+    4: ("09:00", "17:00"),
+    5: None,
+    6: None,
+}
+
+_DAY_NAMES_RO = {
+    0: "luni", 1: "marți", 2: "miercuri", 3: "joi",
+    4: "vineri", 5: "sâmbătă", 6: "duminică",
+}
+
+
+def _business_hours_text() -> str:
+    lines = []
+    for day_idx, hours in BUSINESS_HOURS.items():
+        name = _DAY_NAMES_RO[day_idx].capitalize()
+        if hours:
+            lines.append(f"- {name}: {hours[0]} – {hours[1]}")
+        else:
+            lines.append(f"- {name}: închis")
+    return "\n".join(lines)
+
+
+def is_within_business_hours(date_str: str, time_str: str) -> bool:
+    """Return True if the given date+time falls within configured business hours."""
+    try:
+        appt_dt = dt.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        return False
+    day_hours = BUSINESS_HOURS.get(appt_dt.weekday())
+    if day_hours is None:
+        return False
+    open_t = dt.strptime(day_hours[0], "%H:%M").time()
+    close_t = dt.strptime(day_hours[1], "%H:%M").time()
+    return open_t <= appt_dt.time() < close_t
+
 
 def build_system_prompt() -> str:
     today = date_type.today()
@@ -48,6 +90,13 @@ REGULI STRICTE PENTRU AN:
 - Dacă pacientul nu specifică anul, folosește ÎNTOTDEAUNA {today.year}. NICIODATĂ alt an (ex: 2024, 2025).
 - NU întreba pacientul despre an în nicio situație. Deduce singur: dacă data a trecut deja în {today.year}, folosește {today.year + 1}.
 - NU programa sau verifica date din trecut. Dacă data este anterioară față de astăzi ({today_str}), informează pacientul că nu este posibil.
+
+Orarul clinicii:
+{_business_hours_text()}
+REGULI STRICTE PENTRU ORAR:
+- NU accepta programări în afara orelor de program de mai sus.
+- Dacă pacientul propune o zi închisă sau o oră în afara programului, informează-l politicos și propune o alternativă.
+- NU trimite blocul JSON schedule pentru ore sau zile în afara programului.
 
 Cum să te comporți:
 - Vorbește natural, politicos și prietenos în limba română.
@@ -122,7 +171,6 @@ Exemplu corect când pacientul întreabă dacă are o programare:
 """
 
 
-SYSTEM_PROMPT = build_system_prompt()
 
 
 @app.on_event("startup")
@@ -192,6 +240,20 @@ async def handle_calendar_action(
                 reply = await llm_call(messages)
                 return reply or "Nu se pot face programări pentru date trecute. Vă rog să alegeți o dată viitoare."
 
+            if not is_within_business_hours(appointment["date"], appointment["time"]):
+                day_name = _DAY_NAMES_RO[dt.strptime(appointment["date"], "%Y-%m-%d").weekday()]
+                messages.append({"role": "system", "content": (
+                    f"Programarea solicitată ({day_name} {appointment['date']} ora {appointment['time']}) "
+                    "este în afara orelor de program ale clinicii. "
+                    "Informează pacientul politicos și propune o alternativă în orele de program. "
+                    "Nu include niciun bloc JSON în răspuns."
+                )})
+                reply = await llm_call(messages)
+                return reply or (
+                    f"Îmi pare rău, clinica este închisă {day_name} sau ora {appointment['time']} "
+                    "este în afara programului. Vă rog să alegeți o altă zi sau oră."
+                )
+
             conflict = await run_in_threadpool(
                 check_conflict, appointment["date"], appointment["time"]
             )
@@ -222,7 +284,7 @@ async def handle_calendar_action(
                     "Nu există programări active pentru date trecute."
                 )
             deleted = await run_in_threadpool(
-                cancel_appointment, appointment["date"], appointment["time"]
+                cancel_appointment, appointment["date"], appointment["time"], session_id
             )
             if not deleted:
                 print(f"[main] Anulare: nimic gasit pentru {appointment['date']} {appointment['time']}", flush=True)
@@ -305,7 +367,18 @@ async def voice_stream(session_id: str, audio_buffer: io.BytesIO):
       Each chunk  = 4-byte little-endian uint32 (length) + <length> bytes of MP3
       End marker  = 4 zero bytes
     """
+    try:
+        async for chunk in _voice_stream_inner(session_id, audio_buffer):
+            yield chunk
+    except Exception as e:
+        print(f"[main] Eroare neasteptata [{session_id}]: {e}", flush=True)
+        fallback = await tts_chunk("Îmi pare rău, a apărut o eroare tehnică. Vă rugăm să sunați din nou.")
+        if fallback:
+            yield fallback
+        yield struct.pack('<I', 0)
 
+
+async def _voice_stream_inner(session_id: str, audio_buffer: io.BytesIO):
     # --- STT ---
     segments, _ = await run_in_threadpool(
         get_stt_model().transcribe, audio_buffer, language="ro", vad_filter=True
@@ -313,13 +386,20 @@ async def voice_stream(session_id: str, audio_buffer: io.BytesIO):
     user_text = " ".join([s.text for s in segments]).strip()
     print(f"User [{session_id}]: {user_text}", flush=True)
 
+    if not user_text:
+        audio = await tts_chunk("Nu am înțeles. Vă rog să repetați.")
+        if audio:
+            yield audio
+        yield struct.pack('<I', 0)
+        return
+
     # --- Load session history ---
     history_json = redis_client.get(session_id)
     if history_json:
         messages = json.loads(history_json)
         print(f"[redis] Loaded {len(messages)} messages for {session_id}", flush=True)
     else:
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        messages = [{"role": "system", "content": build_system_prompt()}]
         print(f"[redis] New session for {session_id}", flush=True)
     messages.append({"role": "user", "content": user_text})
 
