@@ -540,6 +540,7 @@ async def twilio_process(request: Request):
     call_sid      = str(form.get("CallSid", "unknown"))
 
     print(f"[twilio] Call {call_sid}, recording: {recording_url}", flush=True)
+    print(f"[twilio] Auth SID={TWILIO_ACCOUNT_SID[:8]}... Token={'set' if TWILIO_AUTH_TOKEN else 'EMPTY'}", flush=True)
 
     try:
         def _download_wav() -> bytes:
