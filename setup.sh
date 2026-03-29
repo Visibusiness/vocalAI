@@ -9,6 +9,14 @@ set -e
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_DIR"
 
+# -----------------------------------------------------------
+# Required env vars (can be pre-set or passed at runtime)
+# e.g.: GOOGLE_CALENDAR_ID=".." TWILIO_ACCOUNT_SID=".." TWILIO_AUTH_TOKEN=".." ./setup.sh
+# -----------------------------------------------------------
+: "${GOOGLE_CALENDAR_ID:?ERROR: GOOGLE_CALENDAR_ID is not set. Export it before running setup.sh}"
+: "${TWILIO_ACCOUNT_SID:?ERROR: TWILIO_ACCOUNT_SID is not set. Export it before running setup.sh}"
+: "${TWILIO_AUTH_TOKEN:?ERROR: TWILIO_AUTH_TOKEN is not set. Export it before running setup.sh}"
+
 echo ""
 echo "============================================"
 echo "  VocalAI — Bootstrap"
@@ -115,10 +123,12 @@ echo "[6/6] Starting VocalAI server on port 8000..."
 echo ""
 echo "============================================"
 echo "  Server starting at http://0.0.0.0:8000"
-echo "  POST /voice  — WAV in, MP3 out"
-echo "  Set GOOGLE_CALENDAR_ID env var and place"
-echo "  credentials.json in the project root."
+echo "  POST /voice        — WAV in, MP3 out"
+echo "  POST /twilio/incoming — Twilio webhook"
 echo "============================================"
 echo ""
 
+GOOGLE_CALENDAR_ID="$GOOGLE_CALENDAR_ID" \
+TWILIO_ACCOUNT_SID="$TWILIO_ACCOUNT_SID" \
+TWILIO_AUTH_TOKEN="$TWILIO_AUTH_TOKEN" \
 uvicorn app.main:app --host 0.0.0.0 --port 8000
