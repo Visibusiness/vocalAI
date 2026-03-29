@@ -541,7 +541,7 @@ async def twilio_process(request: Request):
     print(f"[twilio] Call {call_sid}, recording: {recording_url}", flush=True)
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             r = await client.get(
                 f"{recording_url}.wav",
                 auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
