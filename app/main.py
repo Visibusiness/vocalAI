@@ -4,16 +4,19 @@ import asyncio
 import json
 import re
 import struct
+import time as time_mod
+import uuid
 from datetime import date as date_type, datetime as dt, timedelta
 from urllib.parse import quote
 
+import httpx
 import torch  # must be imported before faster_whisper to init CUDA lib paths
 import redis
 import ollama
 import edge_tts
 
-from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, UploadFile, File, Form, Request
+from fastapi.responses import StreamingResponse, Response
 from fastapi.concurrency import run_in_threadpool
 from faster_whisper import WhisperModel
 from ollama import AsyncClient
@@ -27,6 +30,15 @@ from app.calendar_service import (
 app = FastAPI()
 stt_model = None
 ollama_async = AsyncClient()
+
+# --- TWILIO CONFIG ---
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN  = os.environ.get("TWILIO_AUTH_TOKEN", "")
+BASE_URL           = os.environ.get("BASE_URL", "https://bx4juhqyhsvr7y-8000.proxy.runpod.net")
+GREETING_TEXT      = "Bună ziua, ați ajuns la TestClinic. Cu ce vă pot ajuta?"
+
+# In-memory audio cache: {audio_id: (mp3_bytes, created_at)}
+_audio_cache: dict[str, tuple[bytes, float]] = {}
 
 MODEL = "hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M"
 VOICE = "ro-RO-AlinaNeural"
@@ -468,6 +480,91 @@ async def _voice_stream_inner(session_id: str, audio_buffer: io.BytesIO):
 
     # End-of-stream marker
     yield struct.pack('<I', 0)
+
+
+async def _tts_raw(text: str) -> bytes:
+    """Return raw MP3 bytes (no length prefix)."""
+    chunk = await tts_chunk(text)
+    return chunk[4:] if len(chunk) > 4 else b""
+
+
+def _store_audio(mp3_bytes: bytes) -> str:
+    """Cache MP3 bytes, evict entries older than 5 minutes, return cache key."""
+    now = time_mod.time()
+    stale = [k for k, (_, ts) in _audio_cache.items() if now - ts > 300 and k != "greeting"]
+    for k in stale:
+        del _audio_cache[k]
+    audio_id = str(uuid.uuid4())
+    _audio_cache[audio_id] = (mp3_bytes, now)
+    return audio_id
+
+
+async def voice_to_mp3(session_id: str, audio_buffer: io.BytesIO) -> bytes:
+    """Run the full voice pipeline and return concatenated raw MP3 bytes."""
+    mp3_parts = []
+    async for chunk in _voice_stream_inner(session_id, audio_buffer):
+        if len(chunk) > 4:           # skip end marker (4 zero bytes)
+            mp3_parts.append(chunk[4:])   # strip 4-byte length prefix
+    return b"".join(mp3_parts)
+
+
+@app.get("/audio/{audio_id}")
+async def serve_audio(audio_id: str):
+    entry = _audio_cache.get(audio_id)
+    if not entry:
+        return Response(status_code=404)
+    return Response(content=entry[0], media_type="audio/mpeg")
+
+
+@app.post("/twilio/incoming")
+async def twilio_incoming():
+    """Twilio calls this when someone dials the number. Play greeting, start recording."""
+    if "greeting" not in _audio_cache:
+        mp3 = await _tts_raw(GREETING_TEXT)
+        _audio_cache["greeting"] = (mp3, time_mod.time())
+
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Play>{BASE_URL}/audio/greeting</Play>
+    <Record action="{BASE_URL}/twilio/process" method="POST" maxLength="30" timeout="3" playBeep="false" />
+</Response>"""
+    return Response(content=xml, media_type="text/xml")
+
+
+@app.post("/twilio/process")
+async def twilio_process(request: Request):
+    """Twilio posts here after recording. Download audio, run pipeline, return TwiML."""
+    form = await request.form()
+    recording_url = str(form.get("RecordingUrl", ""))
+    call_sid      = str(form.get("CallSid", "unknown"))
+
+    print(f"[twilio] Call {call_sid}, recording: {recording_url}", flush=True)
+
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                f"{recording_url}.wav",
+                auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+                timeout=10.0,
+            )
+            r.raise_for_status()
+
+        mp3_bytes = await voice_to_mp3(call_sid, io.BytesIO(r.content))
+        audio_id  = _store_audio(mp3_bytes)
+
+        xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Play>{BASE_URL}/audio/{audio_id}</Play>
+    <Record action="{BASE_URL}/twilio/process" method="POST" maxLength="30" timeout="3" playBeep="false" />
+</Response>"""
+    except Exception as e:
+        print(f"[twilio] Eroare procesare {call_sid}: {e}", flush=True)
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say language="ro-RO">Îmi pare rău, a apărut o eroare. Vă rugăm să sunați din nou.</Say>
+</Response>"""
+
+    return Response(content=xml, media_type="text/xml")
 
 
 @app.post("/voice")

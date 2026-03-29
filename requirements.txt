@@ -11,6 +11,7 @@ redis
 fastapi
 uvicorn[standard]
 python-multipart
+httpx
 
 # Google Calendar integration
 google-api-python-client
