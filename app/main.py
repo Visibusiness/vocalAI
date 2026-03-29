@@ -10,6 +10,7 @@ from datetime import date as date_type, datetime as dt, timedelta
 from urllib.parse import quote
 
 import httpx
+import requests as req_lib
 import torch  # must be imported before faster_whisper to init CUDA lib paths
 import redis
 import ollama
@@ -541,15 +542,17 @@ async def twilio_process(request: Request):
     print(f"[twilio] Call {call_sid}, recording: {recording_url}", flush=True)
 
     try:
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            r = await client.get(
+        def _download_wav() -> bytes:
+            r = req_lib.get(
                 f"{recording_url}.wav",
                 auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
-                timeout=10.0,
+                timeout=10,
             )
             r.raise_for_status()
+            return r.content
 
-        mp3_bytes = await voice_to_mp3(call_sid, io.BytesIO(r.content))
+        wav_bytes = await run_in_threadpool(_download_wav)
+        mp3_bytes = await voice_to_mp3(call_sid, io.BytesIO(wav_bytes))
         audio_id  = _store_audio(mp3_bytes)
 
         xml = f"""<?xml version="1.0" encoding="UTF-8"?>
