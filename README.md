@@ -1,21 +1,23 @@
 # VocalAI — Voice Receptionist
 
-A Romanian-language AI receptionist for a clinic. Patients speak into a microphone, the AI understands them, holds a conversation, and books appointments directly into Google Calendar.
+A Romanian-language AI receptionist for a clinic. Patients call a real phone number, the AI understands them, holds a conversation, and books appointments directly into Google Calendar.
 
 ## How it works
 
 ```
-Patient speaks (WAV)
+Patient calls Twilio number
        ↓
-Whisper (speech-to-text)
+Twilio records voice → POSTs to /twilio/process
        ↓
-Redis (conversation memory)
+Whisper large-v3-turbo (speech-to-text)
+       ↓
+Redis (conversation memory per call)
        ↓
 Ollama / Gemma-3-27B (understands + replies in Romanian)
        ↓
-Google Calendar (books appointment if confirmed)
+Google Calendar (books/cancels/checks appointments)
        ↓
-Edge-TTS (text-to-speech → MP3)
+Edge-TTS → MP3 served back to Twilio
        ↓
 Patient hears the response
 ```
@@ -29,31 +31,42 @@ The assistant collects the patient's **name**, **date**, and **time** through na
 **Full bootstrap on a fresh Linux server (RunPod / bare metal):**
 
 ```bash
+export GOOGLE_CALENDAR_ID="your-email@gmail.com"
+export TWILIO_ACCOUNT_SID="ACxxxxxxxxxxxxxxxx"
+export TWILIO_AUTH_TOKEN="your_auth_token"
 ./setup.sh
 ```
 
-Then start with your calendar ID:
-
-```bash
-GOOGLE_CALENDAR_ID="your-email@gmail.com" uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
+`setup.sh` installs all dependencies, starts Redis and Ollama, pulls the LLM model, and launches the FastAPI server. All three env vars are required — the script will error immediately if any is missing.
 
 **Requirements:**
 - NVIDIA GPU with CUDA
-- Redis running on `localhost:6379`
-- Ollama running on `localhost:11434` with the Gemma-3 model pulled
-- Internet access (Edge-TTS calls Microsoft servers)
+- Internet access (Edge-TTS calls Microsoft servers, Twilio downloads recordings)
 
 ---
 
-## Testing from your laptop
+## Twilio setup (one-time)
+
+1. Create a free account at [twilio.com](https://twilio.com) and get a phone number
+2. In **Twilio Console → Phone Numbers → your number → Voice webhook**, set:
+   - URL: `https://your-server/twilio/incoming`
+   - Method: `HTTP POST`
+3. Find your **Account SID** and **Auth Token** on the Twilio Console dashboard
+4. Pass them as env vars when starting the server (see above)
+
+Your `BASE_URL` defaults to the RunPod proxy URL hardcoded in `app/main.py`. Update it via the `BASE_URL` env var if your server URL changes.
+
+---
+
+## Testing from your laptop (mic client)
 
 ```bash
 pip install sounddevice soundfile httpx pydub
 sudo apt install portaudio19-dev ffmpeg
 
-python client.py          # records 6s of mic audio, sends to server, plays response
-python client.py --new    # start a fresh conversation session
+python client.py                    # records 6s of mic audio, sends to server, plays response
+python client.py --new              # start a fresh conversation session
+python client.py --phone +40721000  # use phone number as session ID
 ```
 
 Update `SERVER_URL` in `client.py` to point to your running server.
@@ -62,15 +75,13 @@ Update `SERVER_URL` in `client.py` to point to your running server.
 
 ## Google Calendar setup
 
-See the **Google Calendar Setup** section in `CLAUDE.md` for full steps.
-
 Short version:
 1. Create a **service account** in Google Cloud Console → download the JSON key
 2. Share your Google Calendar with the service account email (`Make changes to events`)
 3. Copy the JSON key to the server as `credentials.json`
-4. Start the server with `GOOGLE_CALENDAR_ID="your-email@gmail.com"`
+4. Pass `GOOGLE_CALENDAR_ID="your-email@gmail.com"` at server start
 
-Steps 1 and 2 are one-time. Only steps 3 and 4 repeat on a new server.
+See the **Google Calendar Setup** section in `CLAUDE.md` for full steps.
 
 ---
 
@@ -78,12 +89,12 @@ Steps 1 and 2 are one-time. Only steps 3 and 4 repeat on a new server.
 
 | File | Purpose |
 |---|---|
-| `app/main.py` | FastAPI server — single `/voice` endpoint |
-| `app/appointment_parser.py` | Extracts booking data from LLM reply |
-| `app/calendar_service.py` | Creates Google Calendar events |
-| `client.py` | Local test client (mic → server → speakers) |
-| `setup.sh` | Full server bootstrap script |
-| `credentials.json` | Service account key (not committed to git) |
+| `app/main.py` | FastAPI server — `/voice`, `/twilio/incoming`, `/twilio/process`, `/audio/{id}` |
+| `app/appointment_parser.py` | Extracts booking JSON from LLM reply |
+| `app/calendar_service.py` | Google Calendar integration |
+| `client.py` | Local mic test client |
+| `setup.sh` | Full server bootstrap (requires env vars) |
+| `credentials.json` | Google service account key (not in git) |
 
 ---
 
@@ -91,7 +102,10 @@ Steps 1 and 2 are one-time. Only steps 3 and 4 repeat on a new server.
 
 | What | Where |
 |---|---|
-| AI name / behavior | `SYSTEM_PROMPT` in `app/main.py` |
-| TTS voice | `"ro-RO-AlinaNeural"` in `app/main.py` |
-| LLM model | Model name string in `app/main.py` + `ollama pull <model>` |
-| Calendar ID | `GOOGLE_CALENDAR_ID` env var at server start |
+| AI name / behavior | `build_system_prompt()` in `app/main.py` |
+| TTS voice | `VOICE = "ro-RO-AlinaNeural"` in `app/main.py` |
+| LLM model | `MODEL` in `app/main.py` + `ollama pull <model>` |
+| Greeting message | `GREETING_TEXT` in `app/main.py` |
+| Business hours | `BUSINESS_HOURS` dict in `app/main.py` |
+| Calendar ID | `GOOGLE_CALENDAR_ID` env var |
+| Server public URL | `BASE_URL` env var |

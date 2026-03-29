@@ -278,15 +278,95 @@ That's it. Steps 1 and 2 never need to be repeated — only steps 3 and 4 when m
 - [x] **Streaming LLM → TTS pipeline** ✅ — first word heard ~2s after speaking
 - [x] **Skip disk write for STT** ✅ — WAV bytes passed directly via io.BytesIO
 - [x] **Whisper large-v3-turbo** ✅ — faster + more accurate than medium for Romanian
-- [ ] **Twilio integration** — replace `client.py` with real inbound phone call handler (highest priority — makes it a real product)
-- [ ] **SMS confirmation** — after booking, send patient a confirmation SMS via Twilio (trivial once Twilio is in)
+- [x] **Twilio integration** ✅ — real inbound phone calls working end-to-end
+- [ ] **Latency optimization** — CRITICAL. Current round-trip is ~15-20s per turn (Twilio record → download → Whisper → LLM → TTS → upload). Must get under 3s for usable conversation. See dedicated section below.
+- [ ] **Twilio Media Streams** — replace record+download with real-time WebSocket audio to eliminate the biggest latency bottleneck (~3-5s saved)
+- [ ] **Barge-in / interruption** — user should be able to speak while AI is talking and interrupt it; requires Media Streams
+- [ ] **End-of-speech detection** — currently uses 3s silence timeout in Twilio `<Record>`; should use VAD (voice activity detection) on the stream for faster cutoff (~0.5s instead of 3s)
+- [ ] **SMS confirmation** — after booking, send patient a confirmation SMS via Twilio
 - [ ] **PostgreSQL database** — replace Redis with persistent DB for call history, appointment audit trail, analytics
 - [ ] **Multi-doctor scheduling** — each doctor has their own calendar; route by specialty or availability
 - [ ] **Full-day calendar scan** — "am ceva pe 25 martie?" currently sends 00:00 and returns empty; needs day-range query
-- [ ] **Docker update** — mount `credentials.json` + `GOOGLE_CALENDAR_ID` env var in Dockerfile
+- [ ] **Docker update** — mount `credentials.json` + env vars in Dockerfile
 - [ ] **Update `test_client.py`** — still uses old non-streaming response format, needs updating to length-prefixed protocol
 - [ ] **Fine-tune STT** — train Whisper on Romanian medical vocabulary (worth doing once real call data exists)
 - [ ] **Fine-tune LLM** — train on real receptionist conversations for more consistent booking flow
+
+---
+
+## Latency Problem & Solutions
+
+Current pipeline per turn (Twilio record+respond flow):
+
+| Step | Time |
+|---|---|
+| Caller speaks + 3s silence timeout | 3s (fixed overhead) |
+| Twilio processes + POSTs to server | ~0.5s |
+| Download WAV from Twilio API | ~1s |
+| Whisper transcription | ~1.5s |
+| LLM response | ~1-2s |
+| TTS generation (full response) | ~1-2s |
+| Twilio fetches MP3 + plays | ~0.5s |
+| **Total** | **~9-13s per turn** |
+
+This is too slow for natural conversation. Target is <3s end-to-end.
+
+### Solution: Twilio Media Streams (WebSocket)
+
+Replace the current record+download approach with a real-time WebSocket connection. Twilio streams raw audio to the server as it's being spoken, eliminating the 3s silence wait and the download step.
+
+Architecture:
+```
+Caller speaks
+→ Twilio streams audio chunks via WebSocket to /twilio/stream
+→ Server runs VAD on chunks (detect end of speech ~0.5s of silence)
+→ Server pipes audio into Whisper in real-time
+→ LLM starts as soon as transcription is ready
+→ TTS streams first sentence back through WebSocket while LLM generates the rest
+→ Caller hears first word in ~2s
+```
+
+Key changes needed:
+- Add WebSocket endpoint `/twilio/stream`
+- Implement VAD (silero-vad or webrtcvad) for end-of-speech detection
+- Replace `<Record>` with `<Connect><Stream>` TwiML
+- Handle barge-in: if new audio arrives while TTS is playing, cancel current playback
+- Audio format: Twilio sends mulaw 8kHz; needs conversion to 16kHz PCM for Whisper
+
+---
+
+## Session Summary — 2026-03-29 (Twilio integration)
+
+### What was built
+
+- **Twilio inbound call handling** — real phone calls now route to the AI end-to-end
+- **Three new endpoints** added to `app/main.py`:
+  - `POST /twilio/incoming` — answers call, plays Romanian greeting via Edge-TTS, starts recording
+  - `POST /twilio/process` — downloads Twilio WAV recording, runs full STT→LLM→TTS pipeline, returns TwiML `<Play>`
+  - `GET /audio/{id}` — serves cached MP3 chunks to Twilio (in-memory dict, 5-min TTL)
+- **`setup.sh` updated** — now requires and passes `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `GOOGLE_CALENDAR_ID` as env vars; fails fast with clear error if any is missing
+
+### Bugs fixed during integration
+
+| Bug | Cause | Fix |
+|---|---|---|
+| 401 on recording download | `TWILIO_AUTH_TOKEN` env var empty (shell variable not exported) | Use `export` before running setup.sh; validate at startup |
+| Twilio error voice on hangup | 404 on final silence recording after caller hangs up | Catch 404 specifically, return empty `<Response>` |
+| httpx stripping auth on redirect | httpx security feature strips auth headers cross-domain | Switched to `requests` library for recording download |
+
+### How to start the server
+
+```bash
+export GOOGLE_CALENDAR_ID="your-email@gmail.com"
+export TWILIO_ACCOUNT_SID="ACxxxxxxxxxxxxxxxx"
+export TWILIO_AUTH_TOKEN="your_auth_token"
+./setup.sh
+```
+
+### Twilio Console configuration
+
+- Voice webhook: `https://your-runpod-url/twilio/incoming` — HTTP POST
+- Account SID + Auth Token: Twilio Console dashboard → Account Info
 
 ---
 
