@@ -553,7 +553,13 @@ async def twilio_process(request: Request):
             r.raise_for_status()
             return r.content
 
-        wav_bytes = await run_in_threadpool(_download_wav)
+        try:
+            wav_bytes = await run_in_threadpool(_download_wav)
+        except req_lib.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                print(f"[twilio] Recording not found (caller hung up): {call_sid}", flush=True)
+                return Response(content="<?xml version='1.0'?><Response></Response>", media_type="text/xml")
+            raise
         mp3_bytes = await voice_to_mp3(call_sid, io.BytesIO(wav_bytes))
         print(f"[twilio] MP3 size: {len(mp3_bytes)} bytes", flush=True)
 
