@@ -514,7 +514,8 @@ async def serve_audio(audio_id: str):
     entry = _audio_cache.get(audio_id)
     if not entry:
         return Response(status_code=404)
-    return Response(content=entry[0], media_type="audio/mpeg")
+    mp3 = entry[0]
+    return Response(content=mp3, media_type="audio/mpeg", headers={"Content-Length": str(len(mp3))})
 
 
 @app.post("/twilio/incoming")
@@ -554,11 +555,18 @@ async def twilio_process(request: Request):
 
         wav_bytes = await run_in_threadpool(_download_wav)
         mp3_bytes = await voice_to_mp3(call_sid, io.BytesIO(wav_bytes))
+        print(f"[twilio] MP3 size: {len(mp3_bytes)} bytes", flush=True)
+
+        if not mp3_bytes:
+            raise RuntimeError("TTS returned empty audio")
+
         audio_id  = _store_audio(mp3_bytes)
+        audio_url = f"{BASE_URL}/audio/{audio_id}"
+        print(f"[twilio] Audio URL: {audio_url}", flush=True)
 
         xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Play>{BASE_URL}/audio/{audio_id}</Play>
+    <Play>{audio_url}</Play>
     <Record action="{BASE_URL}/twilio/process" method="POST" maxLength="30" timeout="3" playBeep="false" />
 </Response>"""
     except Exception as e:
