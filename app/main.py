@@ -408,7 +408,15 @@ async def voice_stream(session_id: str, audio_buffer: io.BytesIO):
 async def _voice_stream_inner(session_id: str, audio_buffer: io.BytesIO):
     # --- STT ---
     segments, _ = await run_in_threadpool(
-        get_stt_model().transcribe, audio_buffer, language="ro", vad_filter=True
+        get_stt_model().transcribe,
+        audio_buffer,
+        language="ro",
+        vad_filter=True,
+        initial_prompt=(
+            "Consultație medicală. Programare la clinică. "
+            "Prenume și nume de familie. Pacient. Doctor. "
+            "Data și ora programării. Confirmare. Anulare."
+        ),
     )
     user_text = " ".join([s.text for s in segments]).strip()
     print(f"User [{session_id}]: {user_text}", flush=True)
@@ -536,7 +544,12 @@ def _build_wav_from_mulaw(mulaw_data: bytes) -> io.BytesIO:
     n_out = len(samples_8k) * 2
     x_in  = np.arange(len(samples_8k))
     x_out = np.linspace(0, len(samples_8k) - 1, n_out)
-    samples_16k = np.interp(x_out, x_in, samples_8k).astype(np.int16)
+    samples_16k = np.interp(x_out, x_in, samples_8k)
+    # Normalize amplitude so Whisper gets a consistent signal level
+    peak = np.abs(samples_16k).max()
+    if peak > 0:
+        samples_16k = samples_16k / peak * 32767 * 0.9
+    samples_16k = samples_16k.astype(np.int16)
     pcm_16k = samples_16k.tobytes()
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
