@@ -516,9 +516,20 @@ async def voice_to_mp3(session_id: str, audio_buffer: io.BytesIO) -> bytes:
 
 
 def _build_wav_from_mulaw(mulaw_data: bytes) -> io.BytesIO:
-    """Convert raw mulaw 8kHz bytes → WAV BytesIO at 16kHz (for Whisper)."""
+    """Convert raw mulaw 8kHz bytes → WAV BytesIO at 16kHz (for Whisper).
+
+    Uses numpy linear interpolation for upsampling — better quality than audioop.ratecv
+    while avoiding a scipy dependency.
+    """
+    import numpy as np
     pcm_8k = audioop.ulaw2lin(mulaw_data, 2)
-    pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
+    samples_8k = np.frombuffer(pcm_8k, dtype=np.int16).astype(np.float32)
+    # Upsample 8kHz → 16kHz via linear interpolation
+    n_out = len(samples_8k) * 2
+    x_in  = np.arange(len(samples_8k))
+    x_out = np.linspace(0, len(samples_8k) - 1, n_out)
+    samples_16k = np.interp(x_out, x_in, samples_8k).astype(np.int16)
+    pcm_16k = samples_16k.tobytes()
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
         wf.setnchannels(1)
@@ -672,7 +683,8 @@ async def twilio_stream(ws: WebSocket):
     async def process_loop():
         nonlocal stream_sid, call_sid
 
-        speech_frames: list[bytes] = []  # accumulated mulaw frames
+        speech_frames: list[bytes] = []  # accumulated mulaw frames for current utterance
+        pre_speech: list[bytes] = []    # rolling pre-speech buffer (captures word onset)
         silence_count = 0
         in_speech = False
         is_processing = False  # True while STT→LLM→TTS is running
@@ -758,26 +770,35 @@ async def twilio_stream(ws: WebSocket):
                     # Fallback to energy-based detection
                     is_speech = audioop.rms(pcm_frame, 2) > 300
 
-                if is_speech:
-                    speech_frames.append(mulaw_frame)
-                    silence_count = 0
-                    in_speech = True
-                elif in_speech:
-                    speech_frames.append(mulaw_frame)  # keep trailing silence
-                    silence_count += 1
-                    if silence_count >= SILENCE_FRAMES:
-                        if len(speech_frames) >= MIN_SPEECH_FRAMES:
-                            print(
-                                f"[stream] Utterance detected: "
-                                f"{len(speech_frames)} frames ({len(speech_frames) * 20}ms)",
-                                flush=True,
-                            )
-                            is_processing = True
-                            frames_copy = list(speech_frames)
-                            asyncio.create_task(handle_utterance(frames_copy))
-                        speech_frames = []
+                if not in_speech:
+                    # Roll pre-speech buffer so we capture the onset of each word
+                    pre_speech.append(mulaw_frame)
+                    if len(pre_speech) > PRE_SPEECH_FRAMES:
+                        pre_speech.pop(0)
+                    if is_speech:
+                        in_speech = True
+                        speech_frames = list(pre_speech)  # include pre-roll
                         silence_count = 0
-                        in_speech = False
+                else:
+                    speech_frames.append(mulaw_frame)  # keep trailing silence too
+                    if not is_speech:
+                        silence_count += 1
+                        if silence_count >= SILENCE_FRAMES:
+                            if len(speech_frames) >= MIN_SPEECH_FRAMES:
+                                print(
+                                    f"[stream] Utterance detected: "
+                                    f"{len(speech_frames)} frames ({len(speech_frames) * 20}ms)",
+                                    flush=True,
+                                )
+                                is_processing = True
+                                frames_copy = list(speech_frames)
+                                asyncio.create_task(handle_utterance(frames_copy))
+                            speech_frames = []
+                            pre_speech = []
+                            in_speech = False
+                            silence_count = 0
+                    else:
+                        silence_count = 0
 
         print(f"[stream] Call ended: {call_sid}", flush=True)
 
