@@ -1,3 +1,5 @@
+import audioop
+import base64
 import os
 import io
 import asyncio
@@ -6,6 +8,7 @@ import re
 import struct
 import time as time_mod
 import uuid
+import wave
 from datetime import date as date_type, datetime as dt, timedelta
 from urllib.parse import quote
 
@@ -15,8 +18,11 @@ import torch  # must be imported before faster_whisper to init CUDA lib paths
 import redis
 import ollama
 import edge_tts
+import webrtcvad
+from pydub import AudioSegment
 
-from fastapi import FastAPI, UploadFile, File, Form, Request
+from fastapi import FastAPI, UploadFile, File, Form, Request, WebSocket
+from fastapi.websockets import WebSocketDisconnect
 from fastapi.responses import StreamingResponse, Response
 from fastapi.concurrency import run_in_threadpool
 from faster_whisper import WhisperModel
@@ -509,6 +515,34 @@ async def voice_to_mp3(session_id: str, audio_buffer: io.BytesIO) -> bytes:
     return b"".join(mp3_parts)
 
 
+def _build_wav_from_mulaw(mulaw_data: bytes) -> io.BytesIO:
+    """Convert raw mulaw 8kHz bytes → WAV BytesIO at 16kHz (for Whisper)."""
+    pcm_8k = audioop.ulaw2lin(mulaw_data, 2)
+    pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(pcm_16k)
+    buf.seek(0)
+    return buf
+
+
+def _mp3_to_mulaw_chunks(mp3_bytes: bytes) -> list[bytes]:
+    """Decode MP3 → mulaw 8kHz mono, return list of 160-byte chunks."""
+    seg = AudioSegment.from_file(io.BytesIO(mp3_bytes), format="mp3")
+    seg = seg.set_frame_rate(8000).set_channels(1).set_sample_width(2)
+    mulaw = audioop.lin2ulaw(seg.raw_data, 2)
+    chunks = []
+    for i in range(0, len(mulaw), 160):
+        frame = mulaw[i:i + 160]
+        if len(frame) < 160:
+            frame = frame + bytes(160 - len(frame))
+        chunks.append(frame)
+    return chunks
+
+
 @app.get("/audio/{audio_id}")
 async def serve_audio(audio_id: str):
     entry = _audio_cache.get(audio_id)
@@ -520,15 +554,13 @@ async def serve_audio(audio_id: str):
 
 @app.post("/twilio/incoming")
 async def twilio_incoming():
-    """Twilio calls this when someone dials the number. Play greeting, start recording."""
-    if "greeting" not in _audio_cache:
-        mp3 = await _tts_raw(GREETING_TEXT)
-        _audio_cache["greeting"] = (mp3, time_mod.time())
-
+    """Answer inbound call and connect Twilio Media Streams WebSocket."""
+    wss_url = BASE_URL.replace("https://", "wss://").replace("http://", "ws://")
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Play>{BASE_URL}/audio/greeting</Play>
-    <Record action="{BASE_URL}/twilio/process" method="POST" maxLength="30" timeout="3" playBeep="false" />
+    <Connect>
+        <Stream url="{wss_url}/twilio/stream" />
+    </Connect>
 </Response>"""
     return Response(content=xml, media_type="text/xml")
 
@@ -583,6 +615,167 @@ async def twilio_process(request: Request):
 </Response>"""
 
     return Response(content=xml, media_type="text/xml")
+
+
+@app.websocket("/twilio/stream")
+async def twilio_stream(ws: WebSocket):
+    """
+    Twilio Media Streams WebSocket handler.
+
+    Twilio streams mulaw 8kHz audio (160 bytes = 20ms per chunk, base64-encoded).
+    We run VAD to detect end-of-speech, then pipe through STT → LLM → TTS,
+    convert the response to mulaw 8kHz, and send it back.
+    """
+    await ws.accept()
+
+    stream_sid: str = ""
+    call_sid: str = ""
+
+    # VAD settings
+    VAD_AGGRESSIVENESS = 2    # 0=least strict, 3=most strict
+    SILENCE_FRAMES     = 25   # 25 × 20ms = 500ms silence → end of speech
+    MIN_SPEECH_FRAMES  = 5    # ignore utterances shorter than 100ms
+
+    vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def send_mulaw(mulaw_chunks: list[bytes]):
+        for chunk in mulaw_chunks:
+            await ws.send_text(json.dumps({
+                "event": "media",
+                "streamSid": stream_sid,
+                "media": {"payload": base64.b64encode(chunk).decode()},
+            }))
+
+    async def receive_loop():
+        try:
+            while True:
+                raw = await ws.receive_text()
+                msg = json.loads(raw)
+                ev = msg.get("event")
+                if ev == "start":
+                    await queue.put(("start", msg))
+                elif ev == "media":
+                    mulaw = base64.b64decode(msg["media"]["payload"])
+                    await queue.put(("media", mulaw))
+                elif ev == "stop":
+                    await queue.put(("stop", None))
+                    break
+        except (WebSocketDisconnect, Exception) as e:
+            print(f"[stream] receive_loop exit: {type(e).__name__}", flush=True)
+        finally:
+            await queue.put(("stop", None))
+
+    async def process_loop():
+        nonlocal stream_sid, call_sid
+
+        speech_frames: list[bytes] = []  # accumulated mulaw frames
+        silence_count = 0
+        in_speech = False
+        is_processing = False  # True while STT→LLM→TTS is running
+
+        async def handle_utterance(frames: list[bytes]):
+            nonlocal is_processing
+            try:
+                mulaw_data = b"".join(frames)
+                wav_buf = await run_in_threadpool(_build_wav_from_mulaw, mulaw_data)
+                end_marker = struct.pack("<I", 0)
+                async for chunk in _voice_stream_inner(call_sid, wav_buf):
+                    if chunk == end_marker:
+                        break
+                    if len(chunk) > 4:
+                        mp3_data = chunk[4:]  # strip 4-byte length prefix
+                        mulaw_chunks = await run_in_threadpool(_mp3_to_mulaw_chunks, mp3_data)
+                        await send_mulaw(mulaw_chunks)
+            except Exception as e:
+                print(f"[stream] handle_utterance error [{call_sid}]: {e}", flush=True)
+            finally:
+                is_processing = False
+                # Drain audio buffered while we were processing
+                drained = 0
+                while not queue.empty():
+                    try:
+                        queue.get_nowait()
+                        drained += 1
+                    except asyncio.QueueEmpty:
+                        break
+                if drained:
+                    print(f"[stream] Drained {drained} queued frames after processing", flush=True)
+
+        while True:
+            try:
+                ev, data = await asyncio.wait_for(queue.get(), timeout=120.0)
+            except asyncio.TimeoutError:
+                print(f"[stream] Timeout on call {call_sid}", flush=True)
+                break
+
+            if ev == "stop":
+                break
+
+            elif ev == "start":
+                stream_sid = data["start"]["streamSid"]
+                call_sid   = data["start"]["callSid"]
+                print(f"[stream] Call started: {call_sid}", flush=True)
+                # Send greeting
+                try:
+                    if "greeting" not in _audio_cache:
+                        mp3 = await _tts_raw(GREETING_TEXT)
+                        _audio_cache["greeting"] = (mp3, time_mod.time())
+                    greeting_chunks = await run_in_threadpool(
+                        _mp3_to_mulaw_chunks, _audio_cache["greeting"][0]
+                    )
+                    await send_mulaw(greeting_chunks)
+                except Exception as e:
+                    print(f"[stream] Greeting error: {e}", flush=True)
+
+            elif ev == "media":
+                if is_processing:
+                    continue  # drain audio during pipeline run
+
+                mulaw_frame: bytes = data
+                if len(mulaw_frame) != 160:
+                    continue  # webrtcvad requires exactly 160 mulaw bytes (20ms@8kHz)
+
+                pcm_frame = audioop.ulaw2lin(mulaw_frame, 2)  # → 320 bytes PCM
+
+                try:
+                    is_speech = vad.is_speech(pcm_frame, 8000)
+                except Exception:
+                    # Fallback to energy-based detection
+                    is_speech = audioop.rms(pcm_frame, 2) > 300
+
+                if is_speech:
+                    speech_frames.append(mulaw_frame)
+                    silence_count = 0
+                    in_speech = True
+                elif in_speech:
+                    speech_frames.append(mulaw_frame)  # keep trailing silence
+                    silence_count += 1
+                    if silence_count >= SILENCE_FRAMES:
+                        if len(speech_frames) >= MIN_SPEECH_FRAMES:
+                            print(
+                                f"[stream] Utterance detected: "
+                                f"{len(speech_frames)} frames ({len(speech_frames) * 20}ms)",
+                                flush=True,
+                            )
+                            is_processing = True
+                            frames_copy = list(speech_frames)
+                            asyncio.create_task(handle_utterance(frames_copy))
+                        speech_frames = []
+                        silence_count = 0
+                        in_speech = False
+
+        print(f"[stream] Call ended: {call_sid}", flush=True)
+
+    try:
+        await asyncio.gather(receive_loop(), process_loop())
+    except Exception as e:
+        print(f"[stream] Fatal error: {e}", flush=True)
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass
 
 
 @app.post("/voice")
