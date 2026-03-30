@@ -54,15 +54,40 @@ curl -X POST http://localhost:8000/voice \
 
 ### `app/main.py` — FastAPI server
 
-- Whisper and Ollama are pre-loaded at startup to eliminate cold start on first request
-- The only endpoint is `POST /voice`: receives `file` (WAV) + `session_id` (form fields), returns a `StreamingResponse`
-- `session_id` is the patient's phone number when using `--phone` flag, otherwise a random ID
+- Whisper, Ollama, and greeting audio are pre-loaded at startup (zero cold start on first call)
+- **Twilio path** (production): `POST /twilio/incoming` → returns `<Connect><Stream>` TwiML → `WS /twilio/stream` handles full call via WebSocket
+- **Direct path** (testing with `client.py`): `POST /voice` receives WAV + `session_id`, returns streaming MP3
+- `session_id` is the Twilio `CallSid` for phone calls, or patient phone number for `client.py`
 - Conversation history stored in Redis under `session_id` as JSON array of `{role, content}` messages with 600s TTL
-- WAV bytes are passed directly to Whisper via `io.BytesIO` — no disk write
-- LLM streams tokens via `ollama.AsyncClient`; complete sentences are sent to Edge-TTS as they arrive
-- Audio is returned as a stream of length-prefixed MP3 chunks (4-byte LE uint32 + MP3 bytes); `\x00\x00\x00\x00` = end
+- LLM streams tokens via `ollama.AsyncClient`; complete sentences sent to Edge-TTS as they arrive
+- Audio returned as length-prefixed MP3 chunks (4-byte LE uint32 + MP3 bytes); `\x00\x00\x00\x00` = end
 - After LLM reply, `extract_appointment()` parses a JSON action block; `handle_calendar_action()` routes to the appropriate handler
 - No temp files — all audio stays in memory end-to-end
+
+### `WS /twilio/stream` — Media Streams WebSocket handler
+
+Two concurrent coroutines via `asyncio.gather`:
+
+- **`receive_loop`**: reads Twilio JSON frames, decodes base64 mulaw chunks → `asyncio.Queue`
+- **`process_loop`**: VAD state machine → end-of-speech detection → `handle_utterance` task
+
+Audio pipeline per utterance:
+```
+Twilio mulaw 8kHz (160 bytes/chunk = 20ms)
+→ webrtcvad end-of-speech detection (500ms silence = 25 frames)
+→ audioop.ulaw2lin → numpy upsample 8kHz→16kHz → WAV
+→ Whisper large-v3-turbo (initial_prompt for Romanian medical vocab)
+→ LLM streaming → per-sentence Edge-TTS
+→ pydub MP3→PCM → audioop.lin2ulaw → mulaw 8kHz
+→ send back through WebSocket to Twilio
+```
+
+Key constants (all in `twilio_stream()`):
+- `SILENCE_FRAMES = 25` — 500ms silence triggers end-of-speech
+- `MIN_SPEECH_FRAMES = 15` — ignore utterances shorter than 300ms (filters noise)
+- `PRE_SPEECH_FRAMES = 5` — 100ms pre-roll captured before first voiced frame
+- `VAD_AGGRESSIVENESS = 2` — webrtcvad strictness (0=loose, 3=strict)
+- Echo cooldown = `total_audio_secs + 0.4s` — VAD stays off while AI audio plays + 0.4s echo buffer
 
 ### JSON action system
 
@@ -279,14 +304,19 @@ That's it. Steps 1 and 2 never need to be repeated — only steps 3 and 4 when m
 - [x] **Skip disk write for STT** ✅ — WAV bytes passed directly via io.BytesIO
 - [x] **Whisper large-v3-turbo** ✅ — faster + more accurate than medium for Romanian
 - [x] **Twilio integration** ✅ — real inbound phone calls working end-to-end
-- [ ] **Latency optimization** — CRITICAL. Current round-trip is ~15-20s per turn (Twilio record → download → Whisper → LLM → TTS → upload). Must get under 3s for usable conversation. See dedicated section below.
-- [ ] **Twilio Media Streams** — replace record+download with real-time WebSocket audio to eliminate the biggest latency bottleneck (~3-5s saved)
-- [ ] **Barge-in / interruption** — user should be able to speak while AI is talking and interrupt it; requires Media Streams
-- [ ] **End-of-speech detection** — currently uses 3s silence timeout in Twilio `<Record>`; should use VAD (voice activity detection) on the stream for faster cutoff (~0.5s instead of 3s)
-- [ ] **SMS confirmation** — after booking, send patient a confirmation SMS via Twilio
+- [x] **Twilio Media Streams** ✅ — real-time WebSocket audio, VAD end-of-speech, ~3.5s latency saved
+- [x] **Echo prevention** ✅ — duration-based cooldown keeps VAD off while AI audio plays
+- [x] **Pre-speech buffer** ✅ — 100ms pre-roll captures word onset, improves transcription
+- [x] **Whisper initial_prompt** ✅ — Romanian medical vocabulary bias improves name/term recognition
+- [x] **Audio normalization** ✅ — PCM amplitude normalized before Whisper for consistent quiet calls
+- [ ] **Transcription quality** — 8kHz phone audio (mulaw) is the main remaining limitation; `Mă numesc Popescu Ion` still occasionally garbled. Options: Twilio `<Gather>` with Google STT, or Deepgram streaming STT instead of Whisper
+- [ ] **Barge-in / interruption** — caller should be able to speak while AI is talking and interrupt it; needs `is_processing` cancel signal wired to VAD
+- [ ] **Romanian Twilio number** — get a +40 national number so calls work from all Romanian carriers (Digi currently can't reach US/UK numbers); requires Twilio regulatory bundle (business docs)
+- [ ] **SMS confirmation** — after booking, send patient a confirmation SMS via Twilio (trivial once Twilio messaging is set up)
+- [ ] **Full-day calendar scan** — "am ceva pe 25 martie?" currently sends 00:00 and returns empty; needs day-range query
+- [ ] **Session ID improvement** — currently using `CallSid` which changes every call; should use caller phone number (`From` field in Twilio start event) so memory persists across calls from same patient
 - [ ] **PostgreSQL database** — replace Redis with persistent DB for call history, appointment audit trail, analytics
 - [ ] **Multi-doctor scheduling** — each doctor has their own calendar; route by specialty or availability
-- [ ] **Full-day calendar scan** — "am ceva pe 25 martie?" currently sends 00:00 and returns empty; needs day-range query
 - [ ] **Docker update** — mount `credentials.json` + env vars in Dockerfile
 - [ ] **Update `test_client.py`** — still uses old non-streaming response format, needs updating to length-prefixed protocol
 - [ ] **Fine-tune STT** — train Whisper on Romanian medical vocabulary (worth doing once real call data exists)
@@ -294,44 +324,77 @@ That's it. Steps 1 and 2 never need to be repeated — only steps 3 and 4 when m
 
 ---
 
-## Latency Problem & Solutions
-
-Current pipeline per turn (Twilio record+respond flow):
+## Latency (current state after Media Streams)
 
 | Step | Time |
 |---|---|
-| Caller speaks + 3s silence timeout | 3s (fixed overhead) |
-| Twilio processes + POSTs to server | ~0.5s |
-| Download WAV from Twilio API | ~1s |
+| Caller speaks + VAD silence detection | ~0.5s |
 | Whisper transcription | ~1.5s |
-| LLM response | ~1-2s |
-| TTS generation (full response) | ~1-2s |
-| Twilio fetches MP3 + plays | ~0.5s |
-| **Total** | **~9-13s per turn** |
+| LLM first sentence | ~1-2s |
+| TTS first sentence | ~0.3s |
+| **First word heard** | **~3-4s after caller stops speaking** |
 
-This is too slow for natural conversation. Target is <3s end-to-end.
+This is acceptable for a phone receptionist. Main remaining bottleneck is Whisper (~1.5s). Options to reduce further: streaming Whisper (not yet supported in faster-whisper), or replace with Deepgram streaming STT.
 
-### Solution: Twilio Media Streams (WebSocket)
+---
 
-Replace the current record+download approach with a real-time WebSocket connection. Twilio streams raw audio to the server as it's being spoken, eliminating the 3s silence wait and the download step.
+## Session Summary — 2026-03-30 (Twilio Media Streams + STT improvements)
 
-Architecture:
+### What was built
+
+- **Twilio Media Streams** — replaced `<Record>` + download with full-duplex WebSocket pipeline
+  - `/twilio/incoming` now returns `<Connect><Stream url="wss://..."/>` TwiML
+  - `/twilio/stream` WebSocket: `receive_loop` + `process_loop` via `asyncio.gather`
+  - webrtcvad VAD: 500ms silence (25 × 20ms frames) triggers end-of-speech
+  - Greeting pre-generated at startup (zero latency on first call)
+  - TTS response sent back through same WebSocket as mulaw 8kHz chunks
+
+- **Echo prevention** — AI's own voice was triggering VAD and being transcribed as user input
+  - Duration-based cooldown: after sending TTS, sleep for `total_audio_secs + 0.4s` with `is_processing=True`
+  - VAD stays off during playback + 0.4s echo buffer
+  - Tried per-chunk 20ms sleep (broke call flow — too slow before VAD opened), settled on duration estimate
+
+- **STT quality improvements**
+  - Pre-speech ring buffer (5 frames = 100ms) — captures word onset before VAD triggers; was missing start of every word
+  - numpy-based upsampling (8kHz→16kHz) instead of `audioop.ratecv`
+  - Audio amplitude normalization before Whisper
+  - `initial_prompt` with Romanian medical vocabulary to bias Whisper toward domain terms
+
+- **Branches**
+  - `nicubranci` — Twilio Media Streams (this branch, production)
+  - `nicubranci_no_twilio` — pre-Twilio state (streaming pipeline + `client.py`, no Twilio code); use for laptop testing
+
+### Bugs fixed
+
+| Bug | Cause | Fix |
+|---|---|---|
+| First call always dropped | Greeting generated on-demand during call (Edge-TTS cold start ~2s) | Pre-generate at server startup |
+| AI voice transcribed as user input | VAD re-enabled before audio finished playing | Duration-based cooldown: `sleep(audio_secs + 0.4)` |
+| Call ended immediately after greeting | Per-chunk 20ms sleep made greeting take 5s; caller hung up | Removed per-chunk sleep; send fast + single duration sleep |
+| Garbled word beginnings | `PRE_SPEECH_FRAMES` defined but never used | Implemented rolling pre-speech buffer |
+| `NameError: PRE_SPEECH_FRAMES` | Constant used in VAD loop but not defined in handler scope | Added definition alongside other VAD constants |
+| Short noise triggers (29-frame, 36-frame) | `MIN_SPEECH_FRAMES=5` (100ms) too short | Raised to 15 (300ms) |
+
+### Known limitations
+
+- **8kHz phone audio quality** — mulaw codec cuts frequencies above 4kHz; Romanian names still occasionally garbled ("Popescu Ion" → "păr pescui on"). `initial_prompt` helps but doesn't fully solve it. Not a pipeline bug — inherent phone codec limitation.
+- **Session ID is CallSid** — memory resets each call. The Twilio `start` event includes `From` (caller's phone number) which would be a better session key. Easy fix for next session.
+- **Digi Romania can't call** — Twilio number is non-Romanian (US/UK); Digi may not route international numbers. Fix: get Romanian +40 Twilio number (requires regulatory bundle submission) or EEA number without regulatory requirement.
+- **Echo cooldown is fixed estimate** — we estimate playback duration from byte count. Works well but slightly off if Twilio's buffer adds delay. Barge-in (cancel mid-response) not yet implemented.
+
+### How to start the server
+
+```bash
+export BASE_URL="https://<pod-id>-8000.proxy.runpod.net"
+export GOOGLE_CALENDAR_ID="your-email@gmail.com"
+export TWILIO_ACCOUNT_SID="ACxxxxxxxxxxxxxxxx"
+export TWILIO_AUTH_TOKEN="your_auth_token"
+pkill -f uvicorn
+cd /workspace/vocalAI
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
-Caller speaks
-→ Twilio streams audio chunks via WebSocket to /twilio/stream
-→ Server runs VAD on chunks (detect end of speech ~0.5s of silence)
-→ Server pipes audio into Whisper in real-time
-→ LLM starts as soon as transcription is ready
-→ TTS streams first sentence back through WebSocket while LLM generates the rest
-→ Caller hears first word in ~2s
-```
 
-Key changes needed:
-- Add WebSocket endpoint `/twilio/stream`
-- Implement VAD (silero-vad or webrtcvad) for end-of-speech detection
-- Replace `<Record>` with `<Connect><Stream>` TwiML
-- Handle barge-in: if new audio arrives while TTS is playing, cancel current playback
-- Audio format: Twilio sends mulaw 8kHz; needs conversion to 16kHz PCM for Whisper
+Twilio Console: Voice webhook → `https://<pod-url>/twilio/incoming` — HTTP POST
 
 ---
 
