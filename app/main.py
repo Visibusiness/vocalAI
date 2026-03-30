@@ -639,15 +639,16 @@ async def twilio_stream(ws: WebSocket):
     vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
     queue: asyncio.Queue = asyncio.Queue()
 
-    async def send_mulaw(mulaw_chunks: list[bytes]):
-        """Send mulaw chunks at real-time pace (20ms/chunk) so callers hear smooth audio."""
+    async def send_mulaw(mulaw_chunks: list[bytes]) -> float:
+        """Send mulaw chunks as fast as possible. Returns audio duration in seconds."""
         for chunk in mulaw_chunks:
             await ws.send_text(json.dumps({
                 "event": "media",
                 "streamSid": stream_sid,
                 "media": {"payload": base64.b64encode(chunk).decode()},
             }))
-            await asyncio.sleep(0.02)  # 160 bytes = 20ms of audio at 8kHz
+        # mulaw is 1 byte per sample at 8kHz → duration = bytes / 8000
+        return sum(len(c) for c in mulaw_chunks) / 8000
 
     async def receive_loop():
         try:
@@ -678,6 +679,7 @@ async def twilio_stream(ws: WebSocket):
 
         async def handle_utterance(frames: list[bytes]):
             nonlocal is_processing
+            total_audio_secs = 0.0
             try:
                 mulaw_data = b"".join(frames)
                 wav_buf = await run_in_threadpool(_build_wav_from_mulaw, mulaw_data)
@@ -688,15 +690,15 @@ async def twilio_stream(ws: WebSocket):
                     if len(chunk) > 4:
                         mp3_data = chunk[4:]  # strip 4-byte length prefix
                         mulaw_chunks = await run_in_threadpool(_mp3_to_mulaw_chunks, mp3_data)
-                        await send_mulaw(mulaw_chunks)
+                        total_audio_secs += await send_mulaw(mulaw_chunks)
             except Exception as e:
                 print(f"[stream] handle_utterance error [{call_sid}]: {e}", flush=True)
             finally:
-                # Keep is_processing=True during cooldown so VAD stays off while
-                # the caller's phone echo decays (audio still playing + ~1s buffer)
-                await asyncio.sleep(1.0)
+                # Wait for audio to finish playing on caller's phone + 0.8s echo decay
+                # (audio was sent instantly; Twilio plays it over total_audio_secs seconds)
+                await asyncio.sleep(total_audio_secs + 0.8)
                 is_processing = False
-                # Drain audio buffered while we were processing + cooldown
+                # Drain audio buffered while we were processing + waiting
                 drained = 0
                 while not queue.empty():
                     try:
@@ -729,9 +731,9 @@ async def twilio_stream(ws: WebSocket):
                     greeting_chunks = await run_in_threadpool(
                         _mp3_to_mulaw_chunks, _audio_cache["greeting"][0]
                     )
-                    await send_mulaw(greeting_chunks)
-                    # Cooldown: let caller's phone echo decay before VAD opens
-                    await asyncio.sleep(1.0)
+                    greeting_secs = await send_mulaw(greeting_chunks)
+                    # Wait for greeting to finish playing + 0.8s echo decay
+                    await asyncio.sleep(greeting_secs + 0.8)
                     while not queue.empty():
                         try:
                             queue.get_nowait()
