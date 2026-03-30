@@ -646,6 +646,7 @@ async def twilio_stream(ws: WebSocket):
     VAD_AGGRESSIVENESS = 2    # 0=least strict, 3=most strict
     SILENCE_FRAMES     = 25   # 25 × 20ms = 500ms silence → end of speech
     MIN_SPEECH_FRAMES  = 5    # ignore utterances shorter than 100ms
+    PRE_SPEECH_FRAMES  = 5    # frames to prepend before first voiced frame (word onset)
 
     vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
     queue: asyncio.Queue = asyncio.Queue()
