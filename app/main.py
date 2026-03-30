@@ -640,12 +640,14 @@ async def twilio_stream(ws: WebSocket):
     queue: asyncio.Queue = asyncio.Queue()
 
     async def send_mulaw(mulaw_chunks: list[bytes]):
+        """Send mulaw chunks at real-time pace (20ms/chunk) so callers hear smooth audio."""
         for chunk in mulaw_chunks:
             await ws.send_text(json.dumps({
                 "event": "media",
                 "streamSid": stream_sid,
                 "media": {"payload": base64.b64encode(chunk).decode()},
             }))
+            await asyncio.sleep(0.02)  # 160 bytes = 20ms of audio at 8kHz
 
     async def receive_loop():
         try:
@@ -690,8 +692,11 @@ async def twilio_stream(ws: WebSocket):
             except Exception as e:
                 print(f"[stream] handle_utterance error [{call_sid}]: {e}", flush=True)
             finally:
+                # Keep is_processing=True during cooldown so VAD stays off while
+                # the caller's phone echo decays (audio still playing + ~1s buffer)
+                await asyncio.sleep(1.0)
                 is_processing = False
-                # Drain audio buffered while we were processing
+                # Drain audio buffered while we were processing + cooldown
                 drained = 0
                 while not queue.empty():
                     try:
@@ -716,7 +721,7 @@ async def twilio_stream(ws: WebSocket):
                 stream_sid = data["start"]["streamSid"]
                 call_sid   = data["start"]["callSid"]
                 print(f"[stream] Call started: {call_sid}", flush=True)
-                # Send greeting
+                # Send greeting (real-time paced via send_mulaw)
                 try:
                     if "greeting" not in _audio_cache:
                         mp3 = await _tts_raw(GREETING_TEXT)
@@ -725,6 +730,13 @@ async def twilio_stream(ws: WebSocket):
                         _mp3_to_mulaw_chunks, _audio_cache["greeting"][0]
                     )
                     await send_mulaw(greeting_chunks)
+                    # Cooldown: let caller's phone echo decay before VAD opens
+                    await asyncio.sleep(1.0)
+                    while not queue.empty():
+                        try:
+                            queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
                 except Exception as e:
                     print(f"[stream] Greeting error: {e}", flush=True)
 
