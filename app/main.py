@@ -728,9 +728,9 @@ async def twilio_stream(ws: WebSocket):
             except Exception as e:
                 print(f"[stream] handle_utterance error [{call_sid}]: {e}", flush=True)
             finally:
-                # Wait for audio to finish playing on caller's phone + 0.8s echo decay
+                # Wait for audio to finish playing on caller's phone + 0.4s echo decay
                 # (audio was sent instantly; Twilio plays it over total_audio_secs seconds)
-                await asyncio.sleep(total_audio_secs + 0.8)
+                await asyncio.sleep(total_audio_secs + 0.4)
                 is_processing = False
                 # Drain audio buffered while we were processing + waiting
                 drained = 0
@@ -761,8 +761,8 @@ async def twilio_stream(ws: WebSocket):
                 try:
                     greeting_chunks = _greeting_mulaw
                     greeting_secs = await send_mulaw(greeting_chunks)
-                    # Wait for greeting to finish playing + 0.8s echo decay
-                    await asyncio.sleep(greeting_secs + 0.8)
+                    # Wait for greeting to finish playing + 0.4s echo decay
+                    await asyncio.sleep(greeting_secs + 0.4)
                     while not queue.empty():
                         try:
                             queue.get_nowait()
