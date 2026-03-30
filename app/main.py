@@ -37,6 +37,7 @@ from app.calendar_service import (
 app = FastAPI()
 stt_model = None
 ollama_async = AsyncClient()
+_greeting_mulaw: list[bytes] = []   # pre-generated at startup, ready for first call
 
 # --- TWILIO CONFIG ---
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
@@ -207,6 +208,13 @@ async def load_models():
         options={"temperature": 0, "num_ctx": 8192, "num_predict": 1},
     )
     print("Ollama ready.", flush=True)
+
+    print("Pre-generating greeting audio...", flush=True)
+    global _greeting_mulaw
+    mp3 = await _tts_raw(GREETING_TEXT)
+    _audio_cache["greeting"] = (mp3, time_mod.time())
+    _greeting_mulaw = await run_in_threadpool(_mp3_to_mulaw_chunks, mp3)
+    print("Greeting ready.", flush=True)
 
 
 def get_stt_model():
@@ -645,7 +653,7 @@ async def twilio_stream(ws: WebSocket):
     # VAD settings
     VAD_AGGRESSIVENESS = 2    # 0=least strict, 3=most strict
     SILENCE_FRAMES     = 25   # 25 × 20ms = 500ms silence → end of speech
-    MIN_SPEECH_FRAMES  = 5    # ignore utterances shorter than 100ms
+    MIN_SPEECH_FRAMES  = 15   # ignore utterances shorter than 300ms (filters noise/echo)
     PRE_SPEECH_FRAMES  = 5    # frames to prepend before first voiced frame (word onset)
 
     vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
@@ -736,14 +744,9 @@ async def twilio_stream(ws: WebSocket):
                 stream_sid = data["start"]["streamSid"]
                 call_sid   = data["start"]["callSid"]
                 print(f"[stream] Call started: {call_sid}", flush=True)
-                # Send greeting (real-time paced via send_mulaw)
+                # Send greeting — use pre-generated mulaw chunks (zero latency)
                 try:
-                    if "greeting" not in _audio_cache:
-                        mp3 = await _tts_raw(GREETING_TEXT)
-                        _audio_cache["greeting"] = (mp3, time_mod.time())
-                    greeting_chunks = await run_in_threadpool(
-                        _mp3_to_mulaw_chunks, _audio_cache["greeting"][0]
-                    )
+                    greeting_chunks = _greeting_mulaw
                     greeting_secs = await send_mulaw(greeting_chunks)
                     # Wait for greeting to finish playing + 0.8s echo decay
                     await asyncio.sleep(greeting_secs + 0.8)
