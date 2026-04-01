@@ -24,6 +24,14 @@ from googleapiclient.discovery import build
 BUCHAREST = ZoneInfo("Europe/Bucharest")
 
 
+def _anonymize(summary: str) -> str:
+    """Return only the doctor part of an event summary, stripping the patient name.
+    'Dr. Ionescu - Ion Popescu' → 'Dr. Ionescu'
+    'Programare - Ion Popescu' → 'Programare'
+    """
+    return summary.split(" - ")[0].strip() if " - " in summary else summary
+
+
 def _buc(date_str: str, time_str: str) -> datetime:
     """Return a timezone-aware datetime in Europe/Bucharest (handles DST correctly)."""
     naive = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
@@ -93,7 +101,7 @@ def get_appointments(date_str: str, time_str: str) -> list[str]:
         singleEvents=True,
     ).execute()
 
-    return [e.get("summary", "Programare") for e in events_result.get("items", [])]
+    return [_anonymize(e.get("summary", "Programare")) for e in events_result.get("items", [])]
 
 
 def get_appointments_for_day(date_str: str) -> list[str]:
@@ -122,7 +130,7 @@ def get_appointments_for_day(date_str: str) -> list[str]:
         summary = e.get("summary", "Programare")
         start_str = e.get("start", {}).get("dateTime", "")
         time_part = start_str.split("T")[1][:5] if "T" in start_str else ""
-        result.append(f"{summary} la {time_part}" if time_part else summary)
+        result.append(f"{_anonymize(summary)} la {time_part}" if time_part else _anonymize(summary))
     return result
 
 
