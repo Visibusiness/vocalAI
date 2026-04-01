@@ -16,9 +16,18 @@ Install dependencies:
 
 import os
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+
+BUCHAREST = ZoneInfo("Europe/Bucharest")
+
+
+def _buc(date_str: str, time_str: str) -> datetime:
+    """Return a timezone-aware datetime in Europe/Bucharest (handles DST correctly)."""
+    naive = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    return naive.replace(tzinfo=BUCHAREST)
 
 # Path to the service account credentials file (place it in the project root)
 CREDENTIALS_FILE = os.path.join(os.path.dirname(__file__), "..", "credentials.json")
@@ -48,23 +57,16 @@ def check_conflict(date_str: str, time_str: str) -> bool:
         time_str : time in "HH:MM" format
     """
     try:
-        start_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        start_dt = _buc(date_str, time_str)
     except ValueError:
         return False
 
     end_dt = start_dt + timedelta(hours=1)
-
-    # Google Calendar expects RFC3339 with timezone offset
-    # We query with UTC bounds that cover the Europe/Bucharest slot
-    # Using isoformat with Z suffix after converting; simplest: query with timeMin/timeMax
-    time_min = start_dt.strftime("%Y-%m-%dT%H:%M:%S") + "+02:00"
-    time_max = end_dt.strftime("%Y-%m-%dT%H:%M:%S") + "+02:00"
-
     service = _get_service()
     events_result = service.events().list(
         calendarId=CALENDAR_ID,
-        timeMin=time_min,
-        timeMax=time_max,
+        timeMin=start_dt.isoformat(),
+        timeMax=end_dt.isoformat(),
         singleEvents=True,
     ).execute()
 
@@ -78,19 +80,16 @@ def get_appointments(date_str: str, time_str: str) -> list[str]:
     Returns an empty list if nothing is found.
     """
     try:
-        start_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        start_dt = _buc(date_str, time_str)
     except ValueError:
         return []
 
     end_dt = start_dt + timedelta(hours=1)
-    time_min = start_dt.strftime("%Y-%m-%dT%H:%M:%S") + "+02:00"
-    time_max = end_dt.strftime("%Y-%m-%dT%H:%M:%S") + "+02:00"
-
     service = _get_service()
     events_result = service.events().list(
         calendarId=CALENDAR_ID,
-        timeMin=time_min,
-        timeMax=time_max,
+        timeMin=start_dt.isoformat(),
+        timeMax=end_dt.isoformat(),
         singleEvents=True,
     ).execute()
 
@@ -104,19 +103,16 @@ def get_appointments_for_day(date_str: str) -> list[str]:
     Returns strings like "Programare - Ion Popescu la 10:00".
     """
     try:
-        start_dt = datetime.strptime(date_str, "%Y-%m-%d")
+        start_dt = _buc(date_str, "00:00")
     except ValueError:
         return []
 
     end_dt = start_dt + timedelta(days=1)
-    time_min = start_dt.strftime("%Y-%m-%dT00:00:00") + "+02:00"
-    time_max = end_dt.strftime("%Y-%m-%dT00:00:00") + "+02:00"
-
     service = _get_service()
     events_result = service.events().list(
         calendarId=CALENDAR_ID,
-        timeMin=time_min,
-        timeMax=time_max,
+        timeMin=start_dt.isoformat(),
+        timeMax=end_dt.isoformat(),
         singleEvents=True,
         orderBy="startTime",
     ).execute()
@@ -137,19 +133,16 @@ def cancel_appointment(date_str: str, time_str: str) -> bool:
     Returns True if an event was found and deleted, False if nothing was found.
     """
     try:
-        start_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        start_dt = _buc(date_str, time_str)
     except ValueError:
         return False
 
     end_dt = start_dt + timedelta(hours=1)
-    time_min = start_dt.strftime("%Y-%m-%dT%H:%M:%S") + "+02:00"
-    time_max = end_dt.strftime("%Y-%m-%dT%H:%M:%S") + "+02:00"
-
     service = _get_service()
     events_result = service.events().list(
         calendarId=CALENDAR_ID,
-        timeMin=time_min,
-        timeMax=time_max,
+        timeMin=start_dt.isoformat(),
+        timeMax=end_dt.isoformat(),
         singleEvents=True,
     ).execute()
 
@@ -227,7 +220,8 @@ def create_appointment(name: str, date_str: str, time_str: str, phone: str = "",
     if phone:
         description += f"\nTelefon: {phone}"
 
-    summary = f"Dr. {doctor} - {name}" if doctor else f"Programare - {name}"
+    doctor_clean = doctor.strip().removeprefix("Dr. ").removeprefix("dr. ").removeprefix("Dr.").strip()
+    summary = f"Dr. {doctor_clean} - {name}" if doctor_clean else f"Programare - {name}"
     event = {
         "summary": summary,
         "description": description,
