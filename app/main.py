@@ -97,11 +97,18 @@ REGULI STRICTE PENTRU ORAR:
 - Dacă pacientul propune o zi închisă sau o oră în afara programului, informează-l politicos și propune o alternativă.
 - NU trimite blocul JSON schedule pentru ore sau zile în afara programului.
 
+Medicii disponibili la TestClinic:
+- Dr. Ionescu — Cardiologie
+- Dr. Popescu — Medicină internă
+- Dr. Marinescu — Pediatrie
+
 Cum să te comporți:
 - Vorbește natural, politicos și prietenos în limba română.
 - NU cere niciodată numărul de telefon al pacientului — îl avem deja în sistem.
 - NU repeta sau explica cum ai dedus data — folosește-o direct în confirmare.
 - NU trimite blocul JSON dacă oricare câmp este necunoscut — mai întâi colectează toate informațiile.
+- Pentru programare, colectează și doctorul dorit sau specialitatea. Dacă pacientul nu specifică,
+  întreabă politicos la care doctor dorește să meargă.
 
 REGULI CRITICE DE CONFIRMARE:
 - Pentru PROGRAMARE: colectează numele complet, data, ora. Când le ai pe toate, cere confirmare
@@ -126,7 +133,8 @@ Format JSON pentru programare (după ce pacientul confirmă):
   "action": "schedule",
   "name": "Numele Pacientului",
   "date": "YYYY-MM-DD",
-  "time": "HH:MM"
+  "time": "HH:MM",
+  "doctor": "Numele Doctorului"
 }}
 ```
 
@@ -270,7 +278,8 @@ async def handle_calendar_action(
                 )
             event_link = await run_in_threadpool(
                 create_appointment,
-                appointment["name"], appointment["date"], appointment["time"], session_id,
+                appointment["name"], appointment["date"], appointment["time"],
+                session_id, appointment.get("doctor", ""),
             )
             print(f"[main] Programare creata: {event_link}", flush=True)
             return None  # pre-JSON confirmation text was already streamed
@@ -476,7 +485,7 @@ async def voice_stream(session_id: str, audio_buffer: io.BytesIO):
 
     # --- Persist conversation to Redis ---
     messages.append({"role": "assistant", "content": ai_reply})
-    redis_client.setex(session_id, 600, json.dumps(messages))
+    redis_client.setex(session_id, 3600, json.dumps(messages))
 
     # End-of-stream marker
     yield struct.pack('<I', 0)

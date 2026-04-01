@@ -194,7 +194,7 @@ def list_appointments(phone: str) -> list[dict]:
     return result
 
 
-def create_appointment(name: str, date_str: str, time_str: str, phone: str = "") -> str:
+def create_appointment(name: str, date_str: str, time_str: str, phone: str = "", doctor: str = "") -> str:
     """
     Create a 1-hour appointment in Google Calendar.
 
@@ -203,6 +203,7 @@ def create_appointment(name: str, date_str: str, time_str: str, phone: str = "")
         date_str : date in "YYYY-MM-DD" format
         time_str : time in "HH:MM" format
         phone    : patient phone number (stored in event description)
+        doctor   : doctor name (included in event title when provided)
 
     Returns:
         The URL link to the created Google Calendar event.
@@ -221,11 +222,14 @@ def create_appointment(name: str, date_str: str, time_str: str, phone: str = "")
 
     timezone = "Europe/Bucharest"
     description = f"Programare creată automat de TestRec pentru {name}."
+    if doctor:
+        description += f"\nDoctor: {doctor}"
     if phone:
         description += f"\nTelefon: {phone}"
 
+    summary = f"Dr. {doctor} - {name}" if doctor else f"Programare - {name}"
     event = {
-        "summary": f"Programare - {name}",
+        "summary": summary,
         "description": description,
         "start": {
             "dateTime": start_dt.strftime("%Y-%m-%dT%H:%M:%S"),

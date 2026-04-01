@@ -15,7 +15,7 @@ import json
 # Matches a fenced ```json ... ``` block (multiline)
 _JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
 
-REQUIRED_KEYS_SCHEDULE = {"action", "name", "date", "time"}
+REQUIRED_KEYS_SCHEDULE = {"action", "name", "date", "time", "doctor"}
 REQUIRED_KEYS_CANCEL = {"action", "date", "time"}
 REQUIRED_KEYS_CHECK = {"action", "date", "time"}
 REQUIRED_KEYS_LIST = {"action"}
