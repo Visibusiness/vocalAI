@@ -21,7 +21,7 @@ from ollama import AsyncClient
 from app.appointment_parser import extract_appointment
 from app.calendar_service import (
     create_appointment, check_conflict, cancel_appointment,
-    get_appointments, list_appointments,
+    get_appointments, get_appointments_for_day, list_appointments,
 )
 
 app = FastAPI()
@@ -31,9 +31,50 @@ ollama_async = AsyncClient()
 MODEL = "hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M"
 VOICE = "ro-RO-AlinaNeural"
 SENTENCE_END = re.compile(r'(?<=[.!?])\s')
+COMMA_SPLIT = re.compile(r'(?<=,)\s')
+MIN_COMMA_CHUNK = 60  # only split on comma if buffer exceeds this length
 
 # --- CONECTARE REDIS ---
 redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+
+# --- ORE DE PROGRAM ---
+# weekday() returns 0=Monday … 6=Sunday; None means closed
+BUSINESS_HOURS: dict[int, tuple[str, str] | None] = {
+    0: ("09:00", "17:00"),
+    1: ("09:00", "17:00"),
+    2: ("09:00", "17:00"),
+    3: ("09:00", "17:00"),
+    4: ("09:00", "17:00"),
+    5: None,
+    6: None,
+}
+
+_DAY_NAMES_RO = {
+    0: "luni", 1: "marți", 2: "miercuri", 3: "joi",
+    4: "vineri", 5: "sâmbătă", 6: "duminică",
+}
+
+
+def _business_hours_text() -> str:
+    lines = []
+    for day_idx, hours in BUSINESS_HOURS.items():
+        name = _DAY_NAMES_RO[day_idx].capitalize()
+        lines.append(f"- {name}: {hours[0]} – {hours[1]}" if hours else f"- {name}: închis")
+    return "\n".join(lines)
+
+
+def is_within_business_hours(date_str: str, time_str: str) -> bool:
+    """Return True if the given date+time falls within configured business hours."""
+    try:
+        appt_dt = dt.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        return False
+    day_hours = BUSINESS_HOURS.get(appt_dt.weekday())
+    if day_hours is None:
+        return False
+    open_t = dt.strptime(day_hours[0], "%H:%M").time()
+    close_t = dt.strptime(day_hours[1], "%H:%M").time()
+    return open_t <= appt_dt.time() < close_t
 
 
 def build_system_prompt() -> str:
@@ -48,6 +89,13 @@ REGULI STRICTE PENTRU AN:
 - Dacă pacientul nu specifică anul, folosește ÎNTOTDEAUNA {today.year}. NICIODATĂ alt an (ex: 2024, 2025).
 - NU întreba pacientul despre an în nicio situație. Deduce singur: dacă data a trecut deja în {today.year}, folosește {today.year + 1}.
 - NU programa sau verifica date din trecut. Dacă data este anterioară față de astăzi ({today_str}), informează pacientul că nu este posibil.
+
+Orarul clinicii:
+{_business_hours_text()}
+REGULI STRICTE PENTRU ORAR:
+- NU accepta programări în afara orelor de program de mai sus.
+- Dacă pacientul propune o zi închisă sau o oră în afara programului, informează-l politicos și propune o alternativă.
+- NU trimite blocul JSON schedule pentru ore sau zile în afara programului.
 
 Cum să te comporți:
 - Vorbește natural, politicos și prietenos în limba română.
@@ -64,6 +112,8 @@ REGULI CRITICE DE CONFIRMARE:
   NICIODATĂ nu trimite blocul JSON în același mesaj în care ceri confirmarea.
 - Pentru VERIFICARE: când ai data și ora, trimite IMEDIAT blocul JSON cu action "check".
   Nu mai cere confirmare — este doar o interogare.
+  Dacă pacientul întreabă ce programări există într-o zi fără să specifice ora (ex: "am ceva pe 25 martie?",
+  "este ocupat mâine?"), trimite blocul JSON cu time "00:00" — sistemul va verifica toată ziua.
 - Pentru LISTA PROGRAMĂRI: când pacientul întreabă "ce programare am", "am programări", "când am programare"
   sau orice întrebare despre programările sale fără să specifice o dată anume, trimite IMEDIAT blocul JSON
   cu action "list". Nu cere date suplimentare.
@@ -120,9 +170,6 @@ Exemplu corect când pacientul întreabă dacă are o programare:
 {{"action": "check", "date": "{(date_type.today() + timedelta(days=7)).strftime('%Y-%m-%d')}", "time": "15:00"}}
 ```
 """
-
-
-SYSTEM_PROMPT = build_system_prompt()
 
 
 @app.on_event("startup")
@@ -192,6 +239,20 @@ async def handle_calendar_action(
                 reply = await llm_call(messages)
                 return reply or "Nu se pot face programări pentru date trecute. Vă rog să alegeți o dată viitoare."
 
+            if not is_within_business_hours(appointment["date"], appointment["time"]):
+                day_name = _DAY_NAMES_RO[dt.strptime(appointment["date"], "%Y-%m-%d").weekday()]
+                messages.append({"role": "system", "content": (
+                    f"Programarea solicitată ({day_name} {appointment['date']} ora {appointment['time']}) "
+                    "este în afara orelor de program ale clinicii. "
+                    "Informează pacientul politicos și propune o alternativă în orele de program. "
+                    "Nu include niciun bloc JSON în răspuns."
+                )})
+                reply = await llm_call(messages)
+                return reply or (
+                    f"Îmi pare rău, clinica este închisă {day_name} sau ora {appointment['time']} "
+                    "este în afara programului. Vă rog să alegeți o altă zi sau oră."
+                )
+
             conflict = await run_in_threadpool(
                 check_conflict, appointment["date"], appointment["time"]
             )
@@ -246,23 +307,42 @@ async def handle_calendar_action(
                     f"Data de {appointment['date']} este în trecut. "
                     "Puteți verifica doar programări viitoare."
                 )
-            events = await run_in_threadpool(
-                get_appointments, appointment["date"], appointment["time"]
-            )
-            if events:
-                result_msg = (
-                    f"Rezultat verificare din sistem: există o programare pe {appointment['date']} "
-                    f"la ora {appointment['time']}: {', '.join(events)}. "
-                    "Informează pacientul și întreabă dacă dorește să o anuleze sau dacă mai are alte întrebări. "
-                    "Nu include niciun bloc JSON în răspuns."
+            # Full-day scan when patient asks about a day without specifying a time
+            if appointment["time"] == "00:00":
+                events = await run_in_threadpool(
+                    get_appointments_for_day, appointment["date"]
                 )
+                if events:
+                    result_msg = (
+                        f"Rezultat verificare din sistem: există {len(events)} programări pe {appointment['date']}: "
+                        f"{', '.join(events)}. "
+                        "Informează pacientul și întreabă dacă dorește să modifice ceva. "
+                        "Nu include niciun bloc JSON în răspuns."
+                    )
+                else:
+                    result_msg = (
+                        f"Rezultat verificare din sistem: nu există nicio programare pe {appointment['date']}. "
+                        "Informează pacientul și întreabă dacă dorește să programeze o consultație. "
+                        "Nu include niciun bloc JSON în răspuns."
+                    )
             else:
-                result_msg = (
-                    f"Rezultat verificare din sistem: nu există nicio programare pe {appointment['date']} "
-                    f"la ora {appointment['time']}. "
-                    "Informează pacientul și întreabă dacă dorește să programeze o consultație. "
-                    "Nu include niciun bloc JSON în răspuns."
+                events = await run_in_threadpool(
+                    get_appointments, appointment["date"], appointment["time"]
                 )
+                if events:
+                    result_msg = (
+                        f"Rezultat verificare din sistem: există o programare pe {appointment['date']} "
+                        f"la ora {appointment['time']}: {', '.join(events)}. "
+                        "Informează pacientul și întreabă dacă dorește să o anuleze sau dacă mai are alte întrebări. "
+                        "Nu include niciun bloc JSON în răspuns."
+                    )
+                else:
+                    result_msg = (
+                        f"Rezultat verificare din sistem: nu există nicio programare pe {appointment['date']} "
+                        f"la ora {appointment['time']}. "
+                        "Informează pacientul și întreabă dacă dorește să programeze o consultație. "
+                        "Nu include niciun bloc JSON în răspuns."
+                    )
             print(f"[main] Check result: {result_msg}", flush=True)
             messages.append({"role": "system", "content": result_msg})
             reply = await llm_call(messages)
@@ -319,7 +399,7 @@ async def voice_stream(session_id: str, audio_buffer: io.BytesIO):
         messages = json.loads(history_json)
         print(f"[redis] Loaded {len(messages)} messages for {session_id}", flush=True)
     else:
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        messages = [{"role": "system", "content": build_system_prompt()}]
         print(f"[redis] New session for {session_id}", flush=True)
     messages.append({"role": "user", "content": user_text})
 
@@ -353,8 +433,10 @@ async def voice_stream(session_id: str, audio_buffer: io.BytesIO):
 
         sentence_buffer += token
 
-        # Yield a chunk whenever a sentence boundary is reached
+        # Yield a chunk on sentence boundary; also split on commas for long buffers
         m = SENTENCE_END.search(sentence_buffer)
+        if not m and len(sentence_buffer) > MIN_COMMA_CHUNK:
+            m = COMMA_SPLIT.search(sentence_buffer)
         if m:
             to_speak = sentence_buffer[:m.end()].strip()
             sentence_buffer = sentence_buffer[m.end():]
@@ -376,9 +458,19 @@ async def voice_stream(session_id: str, audio_buffer: io.BytesIO):
     if appointment:
         action_text = await handle_calendar_action(appointment, messages, session_id)
         if action_text:
-            # Stream the action response sentence by sentence
-            for sentence in [s.strip() for s in SENTENCE_END.split(action_text) if s.strip()]:
-                audio = await tts_chunk(sentence)
+            # Split into sentences (also split on commas for long parts)
+            sentences = []
+            for part in SENTENCE_END.split(action_text):
+                part = part.strip()
+                if not part:
+                    continue
+                if len(part) > MIN_COMMA_CHUNK:
+                    sentences.extend(s.strip() for s in COMMA_SPLIT.split(part) if s.strip())
+                else:
+                    sentences.append(part)
+            # Run all TTS calls in parallel, yield in order
+            audio_chunks = await asyncio.gather(*[tts_chunk(s) for s in sentences])
+            for audio in audio_chunks:
                 if audio:
                     yield audio
 

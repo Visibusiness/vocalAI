@@ -97,6 +97,39 @@ def get_appointments(date_str: str, time_str: str) -> list[str]:
     return [e.get("summary", "Programare") for e in events_result.get("items", [])]
 
 
+def get_appointments_for_day(date_str: str) -> list[str]:
+    """
+    Return all event summaries for the entire day (used when no specific time is given).
+
+    Returns strings like "Programare - Ion Popescu la 10:00".
+    """
+    try:
+        start_dt = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return []
+
+    end_dt = start_dt + timedelta(days=1)
+    time_min = start_dt.strftime("%Y-%m-%dT00:00:00") + "+02:00"
+    time_max = end_dt.strftime("%Y-%m-%dT00:00:00") + "+02:00"
+
+    service = _get_service()
+    events_result = service.events().list(
+        calendarId=CALENDAR_ID,
+        timeMin=time_min,
+        timeMax=time_max,
+        singleEvents=True,
+        orderBy="startTime",
+    ).execute()
+
+    result = []
+    for e in events_result.get("items", []):
+        summary = e.get("summary", "Programare")
+        start_str = e.get("start", {}).get("dateTime", "")
+        time_part = start_str.split("T")[1][:5] if "T" in start_str else ""
+        result.append(f"{summary} la {time_part}" if time_part else summary)
+    return result
+
+
 def cancel_appointment(date_str: str, time_str: str) -> bool:
     """
     Delete the event at the given date/time slot.
