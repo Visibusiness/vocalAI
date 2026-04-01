@@ -20,7 +20,7 @@ Edge-TTS (text-to-speech → MP3)
 Patient hears the response
 ```
 
-The assistant collects the patient's **name**, **date**, and **time** through natural conversation. When the patient confirms, it creates a 1-hour event in Google Calendar automatically.
+The assistant collects the patient's **name**, **preferred doctor**, **date**, and **time** through natural conversation. When the patient confirms, it creates a 1-hour event in Google Calendar automatically. It also handles conflict detection, cancellations, appointment listings, and respects clinic business hours.
 
 ---
 
@@ -58,6 +58,20 @@ python client.py --new    # start a fresh conversation session
 
 Update `SERVER_URL` in `client.py` to point to your running server.
 
+**Text-based test client (no microphone needed):**
+
+```bash
+python test_client.py --text "Vreau o programare la Dr. Ionescu pe 5 mai la 10:00"
+python test_client.py --text "Ce programări am?" --phone +40721000000
+python test_client.py --new --text "Bună ziua"   # fresh session
+```
+
+**Seed the calendar with demo appointments:**
+
+```bash
+GOOGLE_CALENDAR_ID="your-email@gmail.com" python demo_seed.py
+```
+
 ---
 
 ## Google Calendar setup
@@ -78,10 +92,12 @@ Steps 1 and 2 are one-time. Only steps 3 and 4 repeat on a new server.
 
 | File | Purpose |
 |---|---|
-| `app/main.py` | FastAPI server — single `/voice` endpoint |
-| `app/appointment_parser.py` | Extracts booking data from LLM reply |
-| `app/calendar_service.py` | Creates Google Calendar events |
-| `client.py` | Local test client (mic → server → speakers) |
+| `app/main.py` | FastAPI server — single `/voice` endpoint, streaming pipeline |
+| `app/appointment_parser.py` | Extracts booking JSON from LLM reply |
+| `app/calendar_service.py` | Google Calendar CRUD — DST-aware, anonymizes other patients |
+| `client.py` | Mic-based local test client (records → server → plays) |
+| `test_client.py` | Text-based test client (no mic needed, uses Edge-TTS for input) |
+| `demo_seed.py` | Seeds calendar with demo appointments before a presentation |
 | `setup.sh` | Full server bootstrap script |
 | `credentials.json` | Service account key (not committed to git) |
 
@@ -91,7 +107,10 @@ Steps 1 and 2 are one-time. Only steps 3 and 4 repeat on a new server.
 
 | What | Where |
 |---|---|
-| AI name / behavior | `SYSTEM_PROMPT` in `app/main.py` |
-| TTS voice | `"ro-RO-AlinaNeural"` in `app/main.py` |
-| LLM model | Model name string in `app/main.py` + `ollama pull <model>` |
+| AI name / behavior | `build_system_prompt()` in `app/main.py` |
+| Doctors list | `build_system_prompt()` in `app/main.py` |
+| Business hours | `BUSINESS_HOURS` dict in `app/main.py` |
+| TTS voice | `VOICE` constant in `app/main.py` |
+| LLM model | `MODEL` constant in `app/main.py` + `ollama pull <model>` |
 | Calendar ID | `GOOGLE_CALENDAR_ID` env var at server start |
+| Session timeout | `redis_client.setex(..., 3600, ...)` in `app/main.py` |

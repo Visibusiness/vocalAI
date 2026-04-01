@@ -353,3 +353,104 @@ That's it. Steps 1 and 2 never need to be repeated — only steps 3 and 4 when m
 ### Known issues
 
 - `test_client.py` still uses the old `FileResponse` format — it will break against the new streaming endpoint and needs updating
+
+---
+
+## Session Summary — 2026-04-01 (demo prep, bug fixes & pipeline improvements)
+
+### Context
+
+Preparing the product for a demo with a potential clinic client. Twilio Romanian number pending approval — backup plan is to demo using `test_client.py` + the no-Twilio pipeline directly.
+
+### TTS research
+
+Evaluated replacing Edge-TTS with a local model to eliminate the external network dependency (main cause of Twilio inconsistency). Conclusion:
+
+| Option | Verdict |
+|---|---|
+| **Piper** | MIT, CPU, fast — but Romanian voice is male only, no fine-tuning path for medical vocab |
+| **XTTS v2** | Good Romanian, voice cloning — CPML license, non-commercial only |
+| **F5-TTS-RO** | Best architecture, Apache 2.0 code — but weights are CC-BY-NC |
+| **Edge-TTS (keep)** | Kept for now — best Romanian quality; switch to open-source MIT TTS once real call data exists for fine-tuning |
+
+Decision: keep Edge-TTS, fix Twilio reliability at the architecture level (WebSocket `<Stream>`) when the Romanian number arrives. Plan to train a custom VITS/Matcha-TTS (both MIT) on real call recordings once the product is live.
+
+### Pipeline improvements (all on `nicubranci_no_twilio`)
+
+| Change | Detail |
+|---|---|
+| **Fix `test_client.py`** | Rewritten to use length-prefixed streaming protocol (was using old `x-ai-text` header + non-streaming). Removed dead `send()` function. `--play` flag works. |
+| **Full-day calendar scan** | `check` with `time="00:00"` now queries the entire day instead of returning empty. Added `get_appointments_for_day()` to `calendar_service.py`. System prompt updated: LLM sends `time: "00:00"` for day-level queries. |
+| **Business hours** | Ported from Twilio branch: Mon–Fri 09:00–17:00, closed weekends. System prompt includes schedule. Out-of-hours bookings rejected with LLM re-run proposing alternative. |
+| **Fix stale date bug** | Removed global `SYSTEM_PROMPT = build_system_prompt()`. Now called per new session so today's date is always current (was frozen at server startup). |
+| **Comma sentence splitting** | Added `COMMA_SPLIT` regex + `MIN_COMMA_CHUNK = 60`. Streaming loop now splits on commas for buffers > 60 chars — faster first audio on long sentences. |
+| **Parallel TTS for action responses** | Replaced sequential TTS loop with `asyncio.gather()` — all sentence TTS calls run concurrently. Total time = max(individual) instead of sum(individual). |
+
+### Demo features added
+
+| Feature | Detail |
+|---|---|
+| **Multi-doctor booking** | 3 demo doctors: Dr. Ionescu (Cardiologie), Dr. Popescu (Medicină internă), Dr. Marinescu (Pediatrie). LLM asks which doctor the patient wants. Doctor name included in calendar event summary: `"Dr. Ionescu - Ion Popescu"`. |
+| **`doctor` field in JSON schema** | Added to `REQUIRED_KEYS_SCHEDULE` in `appointment_parser.py`. `create_appointment()` accepts `doctor` param. |
+| **Redis TTL 600s → 3600s** | Sessions survive a full 1-hour demo without expiring. |
+| **`demo_seed.py`** | Seeds calendar with 3 realistic appointments before the demo. Run: `GOOGLE_CALENDAR_ID="..." python demo_seed.py` |
+
+### Bugs fixed
+
+| Bug | Cause | Fix |
+|---|---|---|
+| Conflict not detected, cancellation failed | `+02:00` hardcoded in all calendar queries — wrong in April (Romania is EEST = UTC+3) | Replaced with `zoneinfo.ZoneInfo("Europe/Bucharest")` via `_buc()` helper — handles DST automatically |
+| "Dr. Dr. Ionescu" in calendar | LLM includes "Dr." in JSON value, calendar_service prepends another "Dr." | `_anonymize()` strips existing "Dr." prefix before building summary |
+| `httpx.ResponseNotRead` in test client | `response.text` accessed inside streaming context | Changed to `response.read().decode()` |
+| Patient names leaked in check results | `get_appointments` returned full summaries including patient names | `_anonymize()` strips patient name from summaries for `check`/`get_appointments_for_day` — LLM only sees doctor name and time. `list` action (patient's own appointments) unaffected. |
+
+### Demo scenarios
+
+Seed the calendar first: `GOOGLE_CALENDAR_ID="..." python demo_seed.py`
+
+| Scenario | Command |
+|---|---|
+| Conflict detection | `--text "Vreau la Dr. Ionescu pe 2 aprilie la 10:00"` → follow up with name → confirm |
+| Full-day scan | `--new --text "Ce programări sunt pe 2 aprilie?"` |
+| Cancellation | `--new --text "Vreau să anulez programarea pe 2 aprilie la 14:00"` → confirm |
+| Successful booking | `--new --text "Vreau la Dr. Popescu pe 3 aprilie la 15:00"` → name → confirm |
+| Business hours rejection | `--new --text "Vreau o programare sâmbătă la Dr. Marinescu la 11:00"` |
+
+### Files changed this session
+
+| File | What changed |
+|---|---|
+| `app/main.py` | Business hours, comma splitting, parallel TTS, dynamic system prompt, doctor field, Redis TTL 3600s, privacy rule |
+| `app/calendar_service.py` | `get_appointments_for_day()`, DST fix via `zoneinfo`, `doctor` param in `create_appointment`, `_anonymize()` helper |
+| `app/appointment_parser.py` | `"doctor"` added to `REQUIRED_KEYS_SCHEDULE` |
+| `test_client.py` | Full rewrite to streaming protocol |
+| `client.py` | Updated RunPod proxy URL |
+| `demo_seed.py` | New file — seeds demo calendar |
+
+---
+
+## Next Steps
+
+- [x] **Fix Google Calendar 404** ✅
+- [x] **Conflict checking** ✅
+- [x] **Date parsing robustness** ✅
+- [x] **Phone number as session ID** ✅
+- [x] **List appointments action** ✅
+- [x] **Confirmation gate fixed** ✅
+- [x] **Streaming LLM → TTS pipeline** ✅
+- [x] **Skip disk write for STT** ✅
+- [x] **Whisper large-v3-turbo** ✅
+- [x] **Business hours** ✅
+- [x] **Full-day calendar scan** ✅
+- [x] **Multi-doctor booking** ✅
+- [x] **Fix DST timezone bug** ✅
+- [x] **Patient privacy in check results** ✅
+- [x] **Fix test_client.py streaming** ✅
+- [x] **Parallel TTS for action responses** ✅
+- [ ] **Twilio integration** — switch from `<Record>` webhook to `<Stream>` WebSocket for real-time bidirectional audio (eliminates ~4 network round trips per turn)
+- [ ] **Open-source TTS** — train VITS or Matcha-TTS (both MIT) on Romanian medical vocabulary once real call recordings exist
+- [ ] **SMS confirmation** — send patient SMS after booking via Twilio
+- [ ] **PostgreSQL** — replace Redis with persistent DB for call history, appointment audit trail, analytics
+- [ ] **Multi-doctor scheduling** — route by specialty or doctor preference (foundation already laid with `doctor` field)
+- [ ] **Docker update** — mount `credentials.json` + `GOOGLE_CALENDAR_ID` env var in Dockerfile
+- [ ] **Fine-tune STT** — train Whisper on Romanian medical vocabulary once real call data exists
