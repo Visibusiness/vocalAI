@@ -16,9 +16,24 @@ Install dependencies:
 
 import os
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+
+BUCHAREST_TZ = ZoneInfo("Europe/Bucharest")
+
+
+def _slot_range(date_str: str, time_str: str) -> tuple[str, str]:
+    """
+    Return (time_min, time_max) as RFC3339 strings for a 1-hour slot in
+    Europe/Bucharest time, with the correct UTC offset for the given date
+    (EET +02:00 in winter, EEST +03:00 in summer).
+    """
+    start_naive = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    start_dt = start_naive.replace(tzinfo=BUCHAREST_TZ)
+    end_dt = start_dt + timedelta(hours=1)
+    return start_dt.isoformat(), end_dt.isoformat()
 
 # Path to the service account credentials file (place it in the project root)
 CREDENTIALS_FILE = os.path.join(os.path.dirname(__file__), "..", "credentials.json")
@@ -48,17 +63,9 @@ def check_conflict(date_str: str, time_str: str) -> bool:
         time_str : time in "HH:MM" format
     """
     try:
-        start_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        time_min, time_max = _slot_range(date_str, time_str)
     except ValueError:
         return False
-
-    end_dt = start_dt + timedelta(hours=1)
-
-    # Google Calendar expects RFC3339 with timezone offset
-    # We query with UTC bounds that cover the Europe/Bucharest slot
-    # Using isoformat with Z suffix after converting; simplest: query with timeMin/timeMax
-    time_min = start_dt.strftime("%Y-%m-%dT%H:%M:%S") + "+02:00"
-    time_max = end_dt.strftime("%Y-%m-%dT%H:%M:%S") + "+02:00"
 
     service = _get_service()
     events_result = service.events().list(
@@ -68,8 +75,7 @@ def check_conflict(date_str: str, time_str: str) -> bool:
         singleEvents=True,
     ).execute()
 
-    events = events_result.get("items", [])
-    return len(events) > 0
+    return len(events_result.get("items", [])) > 0
 
 
 def get_appointments(date_str: str, time_str: str) -> list[str]:
@@ -78,13 +84,9 @@ def get_appointments(date_str: str, time_str: str) -> list[str]:
     Returns an empty list if nothing is found.
     """
     try:
-        start_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        time_min, time_max = _slot_range(date_str, time_str)
     except ValueError:
         return []
-
-    end_dt = start_dt + timedelta(hours=1)
-    time_min = start_dt.strftime("%Y-%m-%dT%H:%M:%S") + "+02:00"
-    time_max = end_dt.strftime("%Y-%m-%dT%H:%M:%S") + "+02:00"
 
     service = _get_service()
     events_result = service.events().list(
@@ -104,13 +106,9 @@ def cancel_appointment(date_str: str, time_str: str) -> bool:
     Returns True if an event was found and deleted, False if nothing was found.
     """
     try:
-        start_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        time_min, time_max = _slot_range(date_str, time_str)
     except ValueError:
         return False
-
-    end_dt = start_dt + timedelta(hours=1)
-    time_min = start_dt.strftime("%Y-%m-%dT%H:%M:%S") + "+02:00"
-    time_max = end_dt.strftime("%Y-%m-%dT%H:%M:%S") + "+02:00"
 
     service = _get_service()
     events_result = service.events().list(

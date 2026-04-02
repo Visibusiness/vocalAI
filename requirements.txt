@@ -16,6 +16,7 @@ requests
 pydub
 
 onnxruntime
+tzdata
 
 # Google Calendar integration
 google-api-python-client
