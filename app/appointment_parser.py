@@ -77,6 +77,9 @@ def extract_appointment(ai_reply: str) -> tuple[str, dict | None]:
     elif action == "list":
         pass  # no extra keys required
 
+    elif action == "hangup":
+        pass  # no extra keys required
+
     else:
         print(f"[appointment_parser] Unknown action: {action}")
         return clean_text, None

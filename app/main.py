@@ -12,13 +12,13 @@ import wave
 from datetime import date as date_type, datetime as dt, timedelta
 from urllib.parse import quote
 
+import numpy as np
 import httpx
 import requests as req_lib
 import torch  # must be imported before faster_whisper to init CUDA lib paths
 import redis
 import ollama
 import edge_tts
-import webrtcvad
 from pydub import AudioSegment
 
 from fastapi import FastAPI, UploadFile, File, Form, Request, WebSocket
@@ -36,8 +36,13 @@ from app.calendar_service import (
 
 app = FastAPI()
 stt_model = None
+silero_vad_model = None   # loaded at startup; replaces webrtcvad
 ollama_async = AsyncClient()
 _greeting_mulaw: list[bytes] = []   # pre-generated at startup, ready for first call
+
+# Sentinel yielded by _voice_stream_inner to signal the caller should be hung up
+HANGUP_SIGNAL = "__HANGUP__"
+HANGUP_MARKER = struct.pack('<I', 0xFFFFFFFF)  # 4-byte sentinel, distinct from end marker
 
 # --- TWILIO CONFIG ---
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
@@ -172,6 +177,13 @@ Format JSON pentru lista programărilor pacientului (imediat, fără să ceri al
 {{"action": "list"}}
 ```
 
+Format JSON pentru încheierea convorbirii (când pacientul și-a luat rămas bun și nu mai are întrebări):
+```json
+{{"action": "hangup"}}
+```
+REGULA pentru hangup: trimite blocul JSON hangup DOAR după ce pacientul spune "la revedere", "mulțumesc, pa" sau echivalente.
+Mesajul de rămas bun vine ÎNAINTE de blocul JSON. NICIODATĂ nu încheia înainte ca solicitarea să fie rezolvată.
+
 REGULI STRICTE — TREBUIE RESPECTATE ÎNTOTDEAUNA:
 1. NU știi ce programări există în calendar. Nu ai acces direct. Nu presupune nimic.
 2. Dacă pacientul întreabă dacă există o programare la o anumită dată și oră, NU răspunde din memorie.
@@ -195,10 +207,23 @@ Exemplu corect când pacientul întreabă dacă are o programare:
 
 @app.on_event("startup")
 async def load_models():
-    global stt_model
+    global stt_model, silero_vad_model
     print("Loading Whisper large-v3-turbo...", flush=True)
     stt_model = WhisperModel("large-v3-turbo", device="cuda", compute_type="float16")
     print("Whisper ready.", flush=True)
+
+    print("Loading Silero VAD...", flush=True)
+    try:
+        _model, _ = torch.hub.load(
+            repo_or_dir="snakers4/silero-vad",
+            model="silero_vad",
+            force_reload=False,
+            trust_repo=True,
+        )
+        silero_vad_model = _model.cpu().eval()
+        print("Silero VAD ready.", flush=True)
+    except Exception as e:
+        print(f"Silero VAD load failed ({e}); will fall back to energy-based detection.", flush=True)
 
     print("Warming up Ollama (loading model into VRAM)...", flush=True)
     await run_in_threadpool(
@@ -379,6 +404,10 @@ async def handle_calendar_action(
                 "Aveți programările: ..." if appts else "Nu aveți nicio programare viitoare înregistrată."
             )
 
+        elif action == "hangup":
+            print(f"[main] Hangup requested for {session_id}", flush=True)
+            return HANGUP_SIGNAL
+
     except Exception as e:
         print(f"[main] Eroare la acțiune: {e}", flush=True)
 
@@ -497,7 +526,12 @@ async def _voice_stream_inner(session_id: str, audio_buffer: io.BytesIO):
     _, appointment = extract_appointment(ai_reply)
     if appointment:
         action_text = await handle_calendar_action(appointment, messages, session_id)
-        if action_text:
+        if action_text == HANGUP_SIGNAL:
+            # Speak the goodbye (pre-JSON text), then signal the stream to hang up.
+            if pre_json_audio:
+                yield pre_json_audio
+            yield HANGUP_MARKER
+        elif action_text:
             # Calendar returned an override (conflict, not found, check result, etc.)
             # Discard pre_json_audio — the "confirmed" text was premature.
             for sentence in [s.strip() for s in SENTENCE_END.split(action_text) if s.strip()]:
@@ -549,7 +583,6 @@ def _build_wav_from_mulaw(mulaw_data: bytes) -> io.BytesIO:
     Uses numpy linear interpolation for upsampling — better quality than audioop.ratecv
     while avoiding a scipy dependency.
     """
-    import numpy as np
     pcm_8k = audioop.ulaw2lin(mulaw_data, 2)
     samples_8k = np.frombuffer(pcm_8k, dtype=np.int16).astype(np.float32)
     # Upsample 8kHz → 16kHz via linear interpolation
@@ -597,13 +630,17 @@ async def serve_audio(audio_id: str):
 
 
 @app.post("/twilio/incoming")
-async def twilio_incoming():
+async def twilio_incoming(request: Request):
     """Answer inbound call and connect Twilio Media Streams WebSocket."""
+    form = await request.form()
+    caller_phone = str(form.get("From", "")) or "unknown"
     wss_url = BASE_URL.replace("https://", "wss://").replace("http://", "ws://")
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Connect>
-        <Stream url="{wss_url}/twilio/stream" />
+        <Stream url="{wss_url}/twilio/stream">
+            <Parameter name="caller_phone" value="{caller_phone}"/>
+        </Stream>
     </Connect>
 </Response>"""
     return Response(content=xml, media_type="text/xml")
@@ -674,14 +711,15 @@ async def twilio_stream(ws: WebSocket):
 
     stream_sid: str = ""
     call_sid: str = ""
+    caller_phone: str = ""   # set from Twilio start event; used as Redis session key
 
-    # VAD settings
-    VAD_AGGRESSIVENESS = 2    # 0=least strict, 3=most strict
-    SILENCE_FRAMES     = 25   # 25 × 20ms = 500ms silence → end of speech
-    MIN_SPEECH_FRAMES  = 15   # ignore utterances shorter than 300ms (filters noise/echo)
-    PRE_SPEECH_FRAMES  = 5    # frames to prepend before first voiced frame (word onset)
+    # VAD / speech detection settings
+    SILENCE_FRAMES      = 25    # 25 × 20ms = 500ms silence → end of speech
+    MIN_SPEECH_FRAMES   = 15    # ignore utterances shorter than 300ms (noise/echo filter)
+    PRE_SPEECH_FRAMES   = 5     # frames to prepend before first voiced frame (word onset)
+    SILERO_THRESHOLD    = 0.5   # Silero speech confidence threshold (0–1)
+    SILERO_CHUNK_SAMPLES = 256  # 256 samples @ 8kHz = 32ms per Silero inference
 
-    vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
     queue: asyncio.Queue = asyncio.Queue()
 
     async def send_mulaw(mulaw_chunks: list[bytes]) -> float:
@@ -715,10 +753,12 @@ async def twilio_stream(ws: WebSocket):
             await queue.put(("stop", None))
 
     async def process_loop():
-        nonlocal stream_sid, call_sid
+        nonlocal stream_sid, call_sid, caller_phone
 
         speech_frames: list[bytes] = []  # accumulated mulaw frames for current utterance
-        pre_speech: list[bytes] = []    # rolling pre-speech buffer (captures word onset)
+        pre_speech: list[bytes] = []     # rolling pre-speech buffer (captures word onset)
+        silero_buf = b""                 # PCM int16 accumulator for Silero chunks
+        last_is_speech = False           # last Silero result, reused while accumulating
         silence_count = 0
         in_speech = False
         is_processing = False  # True while STT→LLM→TTS is running
@@ -726,12 +766,17 @@ async def twilio_stream(ws: WebSocket):
         async def handle_utterance(frames: list[bytes]):
             nonlocal is_processing
             total_audio_secs = 0.0
+            should_hangup = False
+            session_id = caller_phone  # phone number → memory persists across calls
+            end_marker = struct.pack("<I", 0)
             try:
                 mulaw_data = b"".join(frames)
                 wav_buf = await run_in_threadpool(_build_wav_from_mulaw, mulaw_data)
-                end_marker = struct.pack("<I", 0)
-                async for chunk in _voice_stream_inner(call_sid, wav_buf):
+                async for chunk in _voice_stream_inner(session_id, wav_buf):
                     if chunk == end_marker:
+                        break
+                    if chunk == HANGUP_MARKER:
+                        should_hangup = True
                         break
                     if len(chunk) > 4:
                         mp3_data = chunk[4:]  # strip 4-byte length prefix
@@ -754,6 +799,12 @@ async def twilio_stream(ws: WebSocket):
                         break
                 if drained:
                     print(f"[stream] Drained {drained} queued frames after processing", flush=True)
+                if should_hangup:
+                    print(f"[stream] Hanging up {call_sid}", flush=True)
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
 
         while True:
             try:
@@ -766,9 +817,10 @@ async def twilio_stream(ws: WebSocket):
                 break
 
             elif ev == "start":
-                stream_sid = data["start"]["streamSid"]
-                call_sid   = data["start"]["callSid"]
-                print(f"[stream] Call started: {call_sid}", flush=True)
+                stream_sid   = data["start"]["streamSid"]
+                call_sid     = data["start"]["callSid"]
+                caller_phone = data["start"].get("customParameters", {}).get("caller_phone", "") or call_sid
+                print(f"[stream] Call started: {call_sid}, session: {caller_phone}", flush=True)
                 # Send greeting — use pre-generated mulaw chunks (zero latency)
                 try:
                     greeting_chunks = _greeting_mulaw
@@ -786,7 +838,7 @@ async def twilio_stream(ws: WebSocket):
             elif ev == "media":
                 mulaw_frame: bytes = data
                 if len(mulaw_frame) != 160:
-                    continue  # webrtcvad requires exactly 160 mulaw bytes (20ms@8kHz)
+                    continue  # Twilio sends exactly 160 mulaw bytes (20ms @ 8kHz)
 
                 if is_processing:
                     # Keep pre-speech ring buffer fresh so caller's first words
@@ -798,11 +850,24 @@ async def twilio_stream(ws: WebSocket):
 
                 pcm_frame = audioop.ulaw2lin(mulaw_frame, 2)  # → 320 bytes PCM
 
-                try:
-                    is_speech = vad.is_speech(pcm_frame, 8000)
-                except Exception:
-                    # Fallback to energy-based detection
-                    is_speech = audioop.rms(pcm_frame, 2) > 300
+                # --- Silero VAD ---
+                # Accumulate PCM until we have a full 256-sample chunk (32ms @ 8kHz),
+                # then run the neural VAD. Reuse the last result between chunks.
+                silero_buf += pcm_frame
+                if len(silero_buf) >= SILERO_CHUNK_SAMPLES * 2:  # *2: int16 = 2 bytes/sample
+                    chunk_pcm = silero_buf[:SILERO_CHUNK_SAMPLES * 2]
+                    silero_buf = silero_buf[SILERO_CHUNK_SAMPLES * 2:]
+                    try:
+                        if silero_vad_model is not None:
+                            pcm_np = np.frombuffer(chunk_pcm, dtype=np.int16).astype(np.float32) / 32768.0
+                            audio_t = torch.from_numpy(pcm_np)
+                            with torch.no_grad():
+                                last_is_speech = silero_vad_model(audio_t, 8000).item() > SILERO_THRESHOLD
+                        else:
+                            last_is_speech = audioop.rms(chunk_pcm, 2) > 300
+                    except Exception:
+                        last_is_speech = audioop.rms(chunk_pcm, 2) > 300
+                is_speech = last_is_speech
 
                 if not in_speech:
                     # Roll pre-speech buffer so we capture the onset of each word
@@ -829,6 +894,8 @@ async def twilio_stream(ws: WebSocket):
                                 asyncio.create_task(handle_utterance(frames_copy))
                             speech_frames = []
                             pre_speech = []
+                            silero_buf = b""
+                            last_is_speech = False
                             in_speech = False
                             silence_count = 0
                     else:

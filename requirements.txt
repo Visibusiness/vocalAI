@@ -13,7 +13,6 @@ uvicorn[standard]
 python-multipart
 httpx
 requests
-webrtcvad-wheels
 pydub
 
 # Google Calendar integration
