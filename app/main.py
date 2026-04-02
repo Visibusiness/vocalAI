@@ -442,6 +442,7 @@ async def _voice_stream_inner(session_id: str, audio_buffer: io.BytesIO):
     full_response = ""
     sentence_buffer = ""
     json_detected = False
+    pre_json_audio = b""  # buffered until after conflict check
 
     async for chunk in await ollama_async.chat(
         model=MODEL,
@@ -458,11 +459,11 @@ async def _voice_stream_inner(session_id: str, audio_buffer: io.BytesIO):
         # Detect start of JSON action block
         if "```json" in full_response or "```\n{" in full_response:
             json_detected = True
-            # Speak whatever was buffered before the backticks
-            pre_json = sentence_buffer.split("```")[0].strip()
-            audio = await tts_chunk(pre_json)
-            if audio:
-                yield audio
+            # Buffer (don't yield yet) the text before the backticks —
+            # we need to check the calendar action first; if there's a conflict
+            # this confirmation text must be suppressed.
+            pre_json_text = sentence_buffer.split("```")[0].strip()
+            pre_json_audio = await tts_chunk(pre_json_text)
             sentence_buffer = ""
             continue
 
@@ -491,11 +492,16 @@ async def _voice_stream_inner(session_id: str, audio_buffer: io.BytesIO):
     if appointment:
         action_text = await handle_calendar_action(appointment, messages, session_id)
         if action_text:
-            # Stream the action response sentence by sentence
+            # Calendar returned an override (conflict, not found, check result, etc.)
+            # Discard pre_json_audio — the "confirmed" text was premature.
             for sentence in [s.strip() for s in SENTENCE_END.split(action_text) if s.strip()]:
                 audio = await tts_chunk(sentence)
                 if audio:
                     yield audio
+        else:
+            # Success — the pre-JSON confirmation text is correct, speak it now.
+            if pre_json_audio:
+                yield pre_json_audio
 
     # --- Persist conversation to Redis ---
     messages.append({"role": "assistant", "content": ai_reply})
@@ -772,12 +778,17 @@ async def twilio_stream(ws: WebSocket):
                     print(f"[stream] Greeting error: {e}", flush=True)
 
             elif ev == "media":
-                if is_processing:
-                    continue  # drain audio during pipeline run
-
                 mulaw_frame: bytes = data
                 if len(mulaw_frame) != 160:
                     continue  # webrtcvad requires exactly 160 mulaw bytes (20ms@8kHz)
+
+                if is_processing:
+                    # Keep pre-speech ring buffer fresh so caller's first words
+                    # aren't cut off when they speak right after the AI finishes.
+                    pre_speech.append(mulaw_frame)
+                    if len(pre_speech) > PRE_SPEECH_FRAMES:
+                        pre_speech.pop(0)
+                    continue
 
                 pcm_frame = audioop.ulaw2lin(mulaw_frame, 2)  # → 320 bytes PCM
 
