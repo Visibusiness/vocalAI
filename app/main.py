@@ -219,8 +219,9 @@ async def load_models():
             model="silero_vad",
             force_reload=False,
             trust_repo=True,
+            onnx=True,   # use onnxruntime backend — avoids NNPACK warnings on VMs
         )
-        silero_vad_model = _model.cpu().eval()
+        silero_vad_model = _model
         print("Silero VAD ready.", flush=True)
     except Exception as e:
         print(f"Silero VAD load failed ({e}); will fall back to energy-based detection.", flush=True)
