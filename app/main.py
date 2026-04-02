@@ -42,7 +42,7 @@ _greeting_mulaw: list[bytes] = []   # pre-generated at startup, ready for first 
 # --- TWILIO CONFIG ---
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN  = os.environ.get("TWILIO_AUTH_TOKEN", "")
-BASE_URL           = os.environ.get("BASE_URL", "https://5t9ekbandiz84s-8000.proxy.runpod.net")
+BASE_URL           = os.environ.get("BASE_URL", "https://i2p6l5cd2jaow2-8000.proxy.runpod.net")
 GREETING_TEXT      = "Bună ziua, ați ajuns la TestClinic. Cu ce vă pot ajuta?"
 
 # In-memory audio cache: {audio_id: (mp3_bytes, created_at)}

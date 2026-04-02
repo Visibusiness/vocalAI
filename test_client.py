@@ -29,7 +29,7 @@ import numpy as np
 import sounddevice as sd
 from pydub import AudioSegment
 
-SERVER_URL = "https://enwpc4da4zg5nw-8000.proxy.runpod.net/voice"
+SERVER_URL = "https://i2p6l5cd2jaow2-8000.proxy.runpod.net/voice"
 SESSION_FILE = os.path.join(os.path.dirname(__file__), ".session_id")
 
 # Romanian male voice for test input (sounds different from AI response voice)

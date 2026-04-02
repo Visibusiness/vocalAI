@@ -28,7 +28,7 @@ import numpy as np
 import sounddevice as sd
 from pydub import AudioSegment
 
-SERVER_URL = "https://8j0nj9eqagvpet-8000.proxy.runpod.net/voice"
+SERVER_URL = "https://i2p6l5cd2jaow2-8000.proxy.runpod.net/voice"
 
 SAMPLE_RATE = 16000   # Hz — Whisper works best at 16 kHz
 CHANNELS = 1
