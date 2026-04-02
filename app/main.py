@@ -456,13 +456,15 @@ async def _voice_stream_inner(session_id: str, audio_buffer: io.BytesIO):
         if json_detected:
             continue  # keep consuming to get the full response; no more TTS
 
-        # Detect start of JSON action block
-        if "```json" in full_response or "```\n{" in full_response:
+        # Detect start of JSON action block (case-insensitive; also catches
+        # raw JSON without backticks in case the LLM omits the fence)
+        _fl = full_response.lower()
+        if "```json" in _fl or "```\n{" in full_response or '{"action"' in full_response:
             json_detected = True
             # Buffer (don't yield yet) the text before the backticks —
             # we need to check the calendar action first; if there's a conflict
             # this confirmation text must be suppressed.
-            pre_json_text = sentence_buffer.split("```")[0].strip()
+            pre_json_text = sentence_buffer.split("```")[0].split('{"action"')[0].strip()
             pre_json_audio = await tts_chunk(pre_json_text)
             sentence_buffer = ""
             continue
@@ -478,11 +480,15 @@ async def _voice_stream_inner(session_id: str, audio_buffer: io.BytesIO):
             if audio:
                 yield audio
 
-    # Yield any remaining text (no JSON block in this turn)
+    # Yield any remaining text (no JSON block in this turn).
+    # Safety-strip any JSON that slipped past the streaming detector.
     if not json_detected and sentence_buffer.strip():
-        audio = await tts_chunk(sentence_buffer.strip())
-        if audio:
-            yield audio
+        safe_text = re.sub(r'`{3}.*?`{3}|\{"action".*', '', sentence_buffer,
+                           flags=re.DOTALL | re.IGNORECASE).strip()
+        if safe_text:
+            audio = await tts_chunk(safe_text)
+            if audio:
+                yield audio
 
     ai_reply = full_response.strip()
     print(f"AI [{session_id}]: {ai_reply}", flush=True)
