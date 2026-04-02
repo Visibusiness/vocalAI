@@ -767,6 +767,9 @@ async def twilio_stream(ws: WebSocket):
         is_processing = False            # True while STT→LLM→TTS is running
         current_utterance_task: asyncio.Task | None = None
         barge_in_count = 0               # consecutive Silero-voiced chunks during processing
+        barge_in_armed_at: float = 0.0   # time.monotonic() when barge-in was armed
+        BARGE_IN_GRACE = 1.5             # seconds after processing starts before barge-in arms
+                                          # (prevents noise/echo immediately after user speech)
 
         async def handle_utterance(frames: list[bytes]):
             nonlocal is_processing
@@ -866,7 +869,10 @@ async def twilio_stream(ws: WebSocket):
                     # --- Barge-in detection ---
                     # Run Silero with a higher threshold while AI is speaking so we
                     # don't mistake echo or background noise for a barge-in.
+                    # Grace period: skip detection until AI has had time to start playing.
                     silero_buf += pcm_frame
+                    if time_mod.monotonic() < barge_in_armed_at:
+                        continue  # still in grace period — discard frame and move on
                     if len(silero_buf) >= SILERO_CHUNK_SAMPLES * 2:
                         chunk_pcm = silero_buf[:SILERO_CHUNK_SAMPLES * 2]
                         silero_buf = silero_buf[SILERO_CHUNK_SAMPLES * 2:]
@@ -954,6 +960,7 @@ async def twilio_stream(ws: WebSocket):
                                 )
                                 is_processing = True
                                 barge_in_count = 0
+                                barge_in_armed_at = time_mod.monotonic() + BARGE_IN_GRACE
                                 frames_copy = list(speech_frames)
                                 current_utterance_task = asyncio.create_task(handle_utterance(frames_copy))
                             speech_frames = []
