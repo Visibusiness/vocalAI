@@ -715,11 +715,13 @@ async def twilio_stream(ws: WebSocket):
     caller_phone: str = ""   # set from Twilio start event; used as Redis session key
 
     # VAD / speech detection settings
-    SILENCE_FRAMES      = 25    # 25 × 20ms = 500ms silence → end of speech
-    MIN_SPEECH_FRAMES   = 15    # ignore utterances shorter than 300ms (noise/echo filter)
-    PRE_SPEECH_FRAMES   = 5     # frames to prepend before first voiced frame (word onset)
-    SILERO_THRESHOLD    = 0.5   # Silero speech confidence threshold (0–1)
-    SILERO_CHUNK_SAMPLES = 256  # 256 samples @ 8kHz = 32ms per Silero inference
+    SILENCE_FRAMES       = 25    # 25 × 20ms = 500ms silence → end of speech
+    MIN_SPEECH_FRAMES    = 15    # ignore utterances shorter than 300ms (noise/echo filter)
+    PRE_SPEECH_FRAMES    = 10    # frames to prepend before first voiced frame (word onset)
+    SILERO_THRESHOLD     = 0.5   # Silero speech confidence threshold (0–1)
+    SILERO_CHUNK_SAMPLES = 256   # 256 samples @ 8kHz = 32ms per Silero inference
+    BARGE_IN_THRESHOLD   = 0.7   # higher confidence required to interrupt AI speech
+    BARGE_IN_FRAMES      = 3     # consecutive voiced Silero chunks (~96ms) to confirm barge-in
 
     queue: asyncio.Queue = asyncio.Queue()
 
@@ -762,12 +764,15 @@ async def twilio_stream(ws: WebSocket):
         last_is_speech = False           # last Silero result, reused while accumulating
         silence_count = 0
         in_speech = False
-        is_processing = False  # True while STT→LLM→TTS is running
+        is_processing = False            # True while STT→LLM→TTS is running
+        current_utterance_task: asyncio.Task | None = None
+        barge_in_count = 0               # consecutive Silero-voiced chunks during processing
 
         async def handle_utterance(frames: list[bytes]):
             nonlocal is_processing
             total_audio_secs = 0.0
             should_hangup = False
+            was_cancelled = False
             session_id = caller_phone  # phone number → memory persists across calls
             end_marker = struct.pack("<I", 0)
             try:
@@ -783,23 +788,29 @@ async def twilio_stream(ws: WebSocket):
                         mp3_data = chunk[4:]  # strip 4-byte length prefix
                         mulaw_chunks = await run_in_threadpool(_mp3_to_mulaw_chunks, mp3_data)
                         total_audio_secs += await send_mulaw(mulaw_chunks)
+            except asyncio.CancelledError:
+                was_cancelled = True
+                print(f"[stream] handle_utterance cancelled (barge-in) [{call_sid}]", flush=True)
+                raise  # propagate so the task is properly marked cancelled
             except Exception as e:
                 print(f"[stream] handle_utterance error [{call_sid}]: {e}", flush=True)
             finally:
-                # Wait for audio to finish playing on caller's phone + 0.4s echo decay
-                # (audio was sent instantly; Twilio plays it over total_audio_secs seconds)
-                await asyncio.sleep(total_audio_secs + 0.4)
-                is_processing = False
-                # Drain audio buffered while we were processing + waiting
-                drained = 0
-                while not queue.empty():
-                    try:
-                        queue.get_nowait()
-                        drained += 1
-                    except asyncio.QueueEmpty:
-                        break
-                if drained:
-                    print(f"[stream] Drained {drained} queued frames after processing", flush=True)
+                if not was_cancelled:
+                    # Normal completion: wait for audio to finish + 0.4s echo decay,
+                    # then drain any audio queued during playback.
+                    await asyncio.sleep(total_audio_secs + 0.4)
+                    is_processing = False
+                    drained = 0
+                    while not queue.empty():
+                        try:
+                            queue.get_nowait()
+                            drained += 1
+                        except asyncio.QueueEmpty:
+                            break
+                    if drained:
+                        print(f"[stream] Drained {drained} queued frames after processing", flush=True)
+                # On barge-in cancellation, process_loop already set is_processing=False
+                # and started collecting speech — no sleep or drain needed here.
                 if should_hangup:
                     print(f"[stream] Hanging up {call_sid}", flush=True)
                     try:
@@ -841,34 +852,85 @@ async def twilio_stream(ws: WebSocket):
                 if len(mulaw_frame) != 160:
                     continue  # Twilio sends exactly 160 mulaw bytes (20ms @ 8kHz)
 
+                # Convert mulaw → PCM before the is_processing check so both
+                # the barge-in path and the normal VAD path can use pcm_frame.
+                pcm_frame = audioop.ulaw2lin(mulaw_frame, 2)  # → 320 bytes PCM
+
                 if is_processing:
                     # Keep pre-speech ring buffer fresh so caller's first words
                     # aren't cut off when they speak right after the AI finishes.
                     pre_speech.append(mulaw_frame)
                     if len(pre_speech) > PRE_SPEECH_FRAMES:
                         pre_speech.pop(0)
-                    continue
 
-                pcm_frame = audioop.ulaw2lin(mulaw_frame, 2)  # → 320 bytes PCM
+                    # --- Barge-in detection ---
+                    # Run Silero with a higher threshold while AI is speaking so we
+                    # don't mistake echo or background noise for a barge-in.
+                    silero_buf += pcm_frame
+                    if len(silero_buf) >= SILERO_CHUNK_SAMPLES * 2:
+                        chunk_pcm = silero_buf[:SILERO_CHUNK_SAMPLES * 2]
+                        silero_buf = silero_buf[SILERO_CHUNK_SAMPLES * 2:]
+                        voiced = False
+                        try:
+                            if silero_vad_model is not None:
+                                pcm_np = np.frombuffer(chunk_pcm, dtype=np.int16).astype(np.float32) / 32768.0
+                                audio_t = torch.from_numpy(pcm_np)
+                                with torch.no_grad():
+                                    voiced = silero_vad_model(audio_t, 8000).item() > BARGE_IN_THRESHOLD
+                            else:
+                                voiced = audioop.rms(chunk_pcm, 2) > 600
+                        except Exception:
+                            pass
 
-                # --- Silero VAD ---
-                # Accumulate PCM until we have a full 256-sample chunk (32ms @ 8kHz),
-                # then run the neural VAD. Reuse the last result between chunks.
-                silero_buf += pcm_frame
-                if len(silero_buf) >= SILERO_CHUNK_SAMPLES * 2:  # *2: int16 = 2 bytes/sample
-                    chunk_pcm = silero_buf[:SILERO_CHUNK_SAMPLES * 2]
-                    silero_buf = silero_buf[SILERO_CHUNK_SAMPLES * 2:]
-                    try:
-                        if silero_vad_model is not None:
-                            pcm_np = np.frombuffer(chunk_pcm, dtype=np.int16).astype(np.float32) / 32768.0
-                            audio_t = torch.from_numpy(pcm_np)
-                            with torch.no_grad():
-                                last_is_speech = silero_vad_model(audio_t, 8000).item() > SILERO_THRESHOLD
+                        if voiced:
+                            barge_in_count += 1
+                            if barge_in_count >= BARGE_IN_FRAMES:
+                                print(f"[stream] Barge-in detected ({barge_in_count} frames) [{call_sid}]", flush=True)
+                                # Cancel in-flight response task
+                                if current_utterance_task and not current_utterance_task.done():
+                                    current_utterance_task.cancel()
+                                # Tell Twilio to stop playing the current audio
+                                try:
+                                    await ws.send_text(json.dumps({"event": "clear", "streamSid": stream_sid}))
+                                except Exception:
+                                    pass
+                                # Transition immediately to speech collection
+                                is_processing = False
+                                in_speech = True
+                                speech_frames = list(pre_speech)
+                                silence_count = 0
+                                barge_in_count = 0
+                                silero_buf = b""
+                                last_is_speech = True
+                                # Fall through to normal VAD logic below with in_speech=True
                         else:
+                            barge_in_count = 0
+
+                    if is_processing:
+                        continue  # still in processing and no barge-in yet
+                    # Barge-in triggered: is_processing=False, in_speech=True,
+                    # speech_frames seeded with pre_speech — fall through to speech
+                    # accumulation below with is_speech=True already set.
+                    is_speech = True
+                else:
+                    # --- Silero VAD (normal path — not processing) ---
+                    # Accumulate PCM until we have a full 256-sample chunk (32ms @ 8kHz),
+                    # then run the neural VAD. Reuse the last result between chunks.
+                    silero_buf += pcm_frame
+                    if len(silero_buf) >= SILERO_CHUNK_SAMPLES * 2:  # *2: int16 = 2 bytes/sample
+                        chunk_pcm = silero_buf[:SILERO_CHUNK_SAMPLES * 2]
+                        silero_buf = silero_buf[SILERO_CHUNK_SAMPLES * 2:]
+                        try:
+                            if silero_vad_model is not None:
+                                pcm_np = np.frombuffer(chunk_pcm, dtype=np.int16).astype(np.float32) / 32768.0
+                                audio_t = torch.from_numpy(pcm_np)
+                                with torch.no_grad():
+                                    last_is_speech = silero_vad_model(audio_t, 8000).item() > SILERO_THRESHOLD
+                            else:
+                                last_is_speech = audioop.rms(chunk_pcm, 2) > 300
+                        except Exception:
                             last_is_speech = audioop.rms(chunk_pcm, 2) > 300
-                    except Exception:
-                        last_is_speech = audioop.rms(chunk_pcm, 2) > 300
-                is_speech = last_is_speech
+                    is_speech = last_is_speech
 
                 if not in_speech:
                     # Roll pre-speech buffer so we capture the onset of each word
@@ -891,8 +953,9 @@ async def twilio_stream(ws: WebSocket):
                                     flush=True,
                                 )
                                 is_processing = True
+                                barge_in_count = 0
                                 frames_copy = list(speech_frames)
-                                asyncio.create_task(handle_utterance(frames_copy))
+                                current_utterance_task = asyncio.create_task(handle_utterance(frames_copy))
                             speech_frames = []
                             pre_speech = []
                             silero_buf = b""
