@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Does
 
-VocalAI is a voice-based conversational AI receptionist ("TestRec") for a clinic called TestClinic. It accepts real phone calls via Twilio, transcribes speech, drives an LLM conversation in Romanian, books/cancels/checks Google Calendar appointments, and speaks back to the caller in real time.
+VocalAI is a voice-based conversational AI receptionist ("Sara") for a clinic called TestClinic. It accepts real phone calls via Twilio, transcribes speech, drives an LLM conversation in Romanian, books/cancels/checks Google Calendar appointments, and speaks back to the caller in real time.
 
 **Pipeline:** Twilio mulaw 8kHz → Silero VAD → Whisper large-v3-turbo (STT) → Redis (history) → Ollama/Gemma-3-27B (LLM) → Google Calendar API → Edge-TTS → mulaw 8kHz → Twilio
 
@@ -30,7 +30,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 Twilio Console: Voice webhook → `https://<pod-url>/twilio/incoming` — HTTP POST
 
-**Current RunPod proxy URL:** `https://i2p6l5cd2jaow2-8000.proxy.runpod.net`
+**Current RunPod proxy URL:** `https://5ipahenri81624-8000.proxy.runpod.net`
 
 ## Branches
 
@@ -179,9 +179,9 @@ Functions: `create_appointment`, `check_conflict`, `cancel_appointment`, `get_ap
 
 ## Changing the AI Persona or Voice
 
-- System prompt: `build_system_prompt()` in `app/main.py`
+- System prompt: `build_system_prompt()` in `app/main.py` — persona is "Sara", includes tone/style rules, sentiment mirroring, and few-shot dialogue examples
 - TTS voice: `"ro-RO-AlinaNeural"` in `app/main.py`
-- Greeting text: `GREETING_TEXT` constant in `app/main.py`
+- Greeting text: `_GREETING_VARIANTS` list in `app/main.py` — one variant is picked randomly at startup each time the server starts
 - LLM model: update model name string in `app/main.py` and `ollama pull <model>`
 
 ## Business Hours
@@ -259,7 +259,8 @@ Main bottleneck is Whisper (~1.5s). Options: streaming Whisper (not yet in faste
 - [x] DST-aware timezone fix (Europe/Bucharest via zoneinfo) ✅
 - [x] Barge-in (caller interrupts AI mid-response) ✅
 - [x] Barge-in grace period (prevents false triggers on noise) ✅
-- [ ] **Romanian +40 Twilio number** — Digi currently can't reach US/UK numbers; needs regulatory bundle
+- [x] **Romanian +40 Twilio number** — acquired, Digi reachability resolved ✅
+- [x] **Humanized AI persona** — renamed to Sara, natural tone/style rules, sentiment mirroring, randomized greeting variants, few-shot dialogue examples in system prompt ✅
 - [ ] **SMS confirmation** — send booking confirmation SMS after appointment created
 - [ ] **Full-day calendar scan** — "am ceva pe 25 martie?" needs day-range query, not just HH:MM slot
 - [ ] **Update test_client.py** — needs length-prefixed streaming protocol
