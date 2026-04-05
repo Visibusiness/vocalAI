@@ -7,17 +7,19 @@ A Romanian-language AI receptionist for a clinic. Patients call a real phone num
 ```
 Patient calls Twilio number
        ↓
-Twilio records voice → POSTs to /twilio/process
+Twilio opens WebSocket → WS /twilio/stream
+       ↓
+Silero VAD (end-of-speech detection)
        ↓
 Whisper large-v3-turbo (speech-to-text)
        ↓
-Redis (conversation memory per call)
+Redis (conversation memory per caller)
        ↓
-Ollama / Gemma-3-27B (understands + replies in Romanian)
+Ollama / Qwen3.5-27B (understands + replies in Romanian)
        ↓
 Google Calendar (books/cancels/checks appointments)
        ↓
-Edge-TTS → MP3 served back to Twilio
+Edge-TTS → mulaw audio streamed back to Twilio
        ↓
 Patient hears the response
 ```
@@ -89,7 +91,7 @@ See the **Google Calendar Setup** section in `CLAUDE.md` for full steps.
 
 | File | Purpose |
 |---|---|
-| `app/main.py` | FastAPI server — `/voice`, `/twilio/incoming`, `/twilio/process`, `/audio/{id}` |
+| `app/main.py` | FastAPI server — `/voice`, `/twilio/incoming`, `WS /twilio/stream`, `/audio/{id}` |
 | `app/appointment_parser.py` | Extracts booking JSON from LLM reply |
 | `app/calendar_service.py` | Google Calendar integration |
 | `client.py` | Local mic test client |
@@ -104,8 +106,8 @@ See the **Google Calendar Setup** section in `CLAUDE.md` for full steps.
 |---|---|
 | AI name / behavior | `build_system_prompt()` in `app/main.py` |
 | TTS voice | `VOICE = "ro-RO-AlinaNeural"` in `app/main.py` |
-| LLM model | `MODEL` in `app/main.py` + `ollama pull <model>` |
-| Greeting message | `GREETING_TEXT` in `app/main.py` |
+| LLM model | `MODEL` in `app/main.py` — `setup.sh` pulls it automatically |
+| Greeting message | `_GREETING_VARIANTS` list in `app/main.py` (random per startup) |
 | Business hours | `BUSINESS_HOURS` dict in `app/main.py` |
 | Calendar ID | `GOOGLE_CALENDAR_ID` env var |
 | Server public URL | `BASE_URL` env var |
