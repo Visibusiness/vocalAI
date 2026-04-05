@@ -64,7 +64,7 @@ fi
 # 5. Start Ollama + pull model
 # -----------------------------------------------------------
 echo "[5/6] Starting Ollama and pulling model..."
-echo "  NOTE: First pull of gemma-3-27b-it-GGUF:Q4_K_M is ~17 GB — this will take a while."
+echo "  NOTE: First pull of qwen3.5:27b-q4_K_M is ~18 GB — this will take a while."
 
 # Start ollama serve in background if not already running
 if ! pgrep -x ollama &>/dev/null; then
@@ -81,17 +81,17 @@ else
 fi
 
 # Pre-download Whisper model weights (avoids cold-start delay on first request)
-echo "  Pre-downloading Whisper medium model weights (CPU, weights-only)..."
+echo "  Pre-downloading Whisper large-v3-turbo model weights (CPU, weights-only)..."
 python3 - <<'PYEOF'
 # Download weights only — no GPU needed, avoids CUDA fork issues
 from faster_whisper import WhisperModel
-WhisperModel("medium", device="cpu", compute_type="int8")
+WhisperModel("large-v3-turbo", device="cpu", compute_type="int8")
 print("  Whisper weights cached.")
 PYEOF
 
 # Pull the model directly
-echo "  Pulling gemma-3-27b-it-GGUF:Q4_K_M (downloads ~17 GB on first run)..."
-ollama pull hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M
+echo "  Pulling qwen3.5:27b-q4_K_M (downloads ~18 GB on first run)..."
+ollama pull qwen3.5:27b-q4_K_M
 echo "  Ollama model ready."
 
 # -----------------------------------------------------------

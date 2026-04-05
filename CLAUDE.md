@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 VocalAI is a voice-based conversational AI receptionist ("Sara") for a clinic called TestClinic. It accepts real phone calls via Twilio, transcribes speech, drives an LLM conversation in Romanian, books/cancels/checks Google Calendar appointments, and speaks back to the caller in real time.
 
-**Pipeline:** Twilio mulaw 8kHz → Silero VAD → Whisper large-v3-turbo (STT) → Redis (history) → Ollama/Gemma-3-27B (LLM) → Google Calendar API → Edge-TTS → mulaw 8kHz → Twilio
+**Pipeline:** Twilio mulaw 8kHz → Silero VAD → Whisper large-v3-turbo (STT) → Redis (history) → Ollama/Qwen3.5-27B (LLM) → Google Calendar API → Edge-TTS → mulaw 8kHz → Twilio
 
 ## Running the Server
 
@@ -158,7 +158,7 @@ Functions: `create_appointment`, `check_conflict`, `cancel_appointment`, `get_ap
 
 ### LLM model
 
-- Model: `hf.co/unsloth/gemma-3-27b-it-GGUF:Q4_K_M` via Ollama, `temperature=0.3`, `num_ctx=8192`
+- Model: `qwen3.5:27b-q4_K_M` via Ollama, `temperature=0.3`, `num_ctx=8192`
 - Streamed via `ollama.AsyncClient` — tokens arrive as async generator, no blocking
 - System prompt built dynamically by `build_system_prompt()` — injects today's date, business hours, and explicit rules for JSON action format
 
