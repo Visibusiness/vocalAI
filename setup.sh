@@ -80,14 +80,20 @@ else
     echo "  Ollama already running."
 fi
 
-# Pre-download Whisper model weights (avoids cold-start delay on first request)
-echo "  Pre-downloading Whisper large-v3-turbo model weights (CPU, weights-only)..."
-python3 - <<'PYEOF'
-# Download weights only — no GPU needed, avoids CUDA fork issues
-from faster_whisper import WhisperModel
-WhisperModel("large-v3-turbo", device="cpu", compute_type="int8")
-print("  Whisper weights cached.")
-PYEOF
+# Convert Romanian fine-tuned Whisper to CTranslate2 format (required by faster-whisper)
+WHISPER_RO_PATH="/workspace/whisper-ro-turbo"
+if [ ! -d "$WHISPER_RO_PATH" ]; then
+    echo "  Converting IonGrozea/whisper-large-v3-ro-turbo to CTranslate2 format..."
+    pip install -q ctranslate2 transformers
+    ct2-transformers-converter \
+        --model IonGrozea/whisper-large-v3-ro-turbo \
+        --output_dir "$WHISPER_RO_PATH" \
+        --quantization float16 \
+        --force
+    echo "  Romanian Whisper model ready at $WHISPER_RO_PATH"
+else
+    echo "  Romanian Whisper model already converted, skipping."
+fi
 
 # Pull the model directly
 echo "  Pulling gemma4:26b (downloads ~17 GB on first run)..."
