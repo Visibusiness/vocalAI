@@ -60,7 +60,7 @@ GREETING_TEXT      = __import__('random').choice(_GREETING_VARIANTS)
 # In-memory audio cache: {audio_id: (mp3_bytes, created_at)}
 _audio_cache: dict[str, tuple[bytes, float]] = {}
 
-MODEL = "gemma4:27b"
+MODEL = "gemma4:26b"
 VOICE = "ro-RO-AlinaNeural"
 SENTENCE_END = re.compile(r'(?<=[.!?])\s')
 

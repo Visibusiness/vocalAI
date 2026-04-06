@@ -64,7 +64,7 @@ fi
 # 5. Start Ollama + pull model
 # -----------------------------------------------------------
 echo "[5/6] Starting Ollama and pulling model..."
-echo "  NOTE: First pull of qwen3.5:27b-q4_K_M is ~18 GB — this will take a while."
+echo "  NOTE: First pull of gemma4:26b is ~17 GB — this will take a while."
 
 # Start ollama serve in background if not already running
 if ! pgrep -x ollama &>/dev/null; then
@@ -90,8 +90,8 @@ print("  Whisper weights cached.")
 PYEOF
 
 # Pull the model directly
-echo "  Pulling qwen3.5:27b-q4_K_M (downloads ~18 GB on first run)..."
-ollama pull qwen3.5:27b-q4_K_M
+echo "  Pulling gemma4:26b (downloads ~17 GB on first run)..."
+ollama pull gemma4:26b
 echo "  Ollama model ready."
 
 # -----------------------------------------------------------
