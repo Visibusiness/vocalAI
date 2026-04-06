@@ -81,22 +81,56 @@ else
 fi
 
 # Convert Romanian fine-tuned Whisper to CTranslate2 format (required by faster-whisper)
+# The model was saved with torch.compile() which adds _orig_mod.model. prefix to all
+# weight keys — we strip those before converting.
 WHISPER_RO_PATH="/workspace/whisper-ro-turbo"
+WHISPER_RO_FIXED="/tmp/whisper-ro-fixed"
 if [ ! -d "$WHISPER_RO_PATH" ]; then
-    echo "  Converting IonGrozea/whisper-large-v3-ro-turbo to CTranslate2 format..."
-    pip install -q ctranslate2 transformers
+    echo "  Downloading and fixing IonGrozea/whisper-large-v3-ro-turbo weight keys..."
+    pip install -q ctranslate2 transformers safetensors
+    python3 - <<'PYEOF'
+import os, torch
+from transformers import WhisperForConditionalGeneration, WhisperConfig, WhisperFeatureExtractor
+
+model_id = "IonGrozea/whisper-large-v3-ro-turbo"
+fixed_dir = "/tmp/whisper-ro-fixed"
+
+print("  Loading state dict from HuggingFace...")
+try:
+    import safetensors.torch
+    from huggingface_hub import hf_hub_download
+    path = hf_hub_download(model_id, "model.safetensors")
+    state_dict = safetensors.torch.load_file(path)
+except Exception:
+    from huggingface_hub import hf_hub_download
+    path = hf_hub_download(model_id, "pytorch_model.bin")
+    state_dict = torch.load(path, map_location="cpu")
+
+print("  Stripping _orig_mod.model. prefix from weight keys...")
+prefix = "_orig_mod.model."
+fixed = {}
+for k, v in state_dict.items():
+    fixed[k[len(prefix):] if k.startswith(prefix) else k] = v
+
+print("  Loading into fresh WhisperForConditionalGeneration...")
+config = WhisperConfig.from_pretrained(model_id)
+model = WhisperForConditionalGeneration(config)
+model.load_state_dict(fixed, strict=True)
+model.save_pretrained(fixed_dir)
+
+fe = WhisperFeatureExtractor.from_pretrained(model_id)
+fe.save_pretrained(fixed_dir)
+print(f"  Fixed model saved to {fixed_dir}")
+PYEOF
+
+    echo "  Converting fixed model to CTranslate2 format..."
     ct2-transformers-converter \
-        --model IonGrozea/whisper-large-v3-ro-turbo \
+        --model "$WHISPER_RO_FIXED" \
         --output_dir "$WHISPER_RO_PATH" \
         --quantization float16 \
         --force
-    # Copy feature extractor config so faster-whisper uses 128 mel bins (large-v3 architecture)
-    python3 -c "
-from transformers import WhisperFeatureExtractor
-fe = WhisperFeatureExtractor.from_pretrained('IonGrozea/whisper-large-v3-ro-turbo')
-fe.save_pretrained('$WHISPER_RO_PATH')
-print('  Feature extractor config saved.')
-"
+    cp "$WHISPER_RO_FIXED/preprocessor_config.json" "$WHISPER_RO_PATH/"
+    rm -rf "$WHISPER_RO_FIXED"
     echo "  Romanian Whisper model ready at $WHISPER_RO_PATH"
 else
     echo "  Romanian Whisper model already converted, skipping."
