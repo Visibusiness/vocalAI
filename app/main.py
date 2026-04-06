@@ -244,9 +244,8 @@ Sara:"Gata, am anulat."
 @app.on_event("startup")
 async def load_models():
     global stt_model, silero_vad_model
-    whisper_model_path = "/workspace/whisper-ro-turbo"
-    print(f"Loading Whisper from {whisper_model_path}...", flush=True)
-    stt_model = WhisperModel(whisper_model_path, device="cuda", compute_type="float16")
+    print("Loading Whisper large-v3-turbo...", flush=True)
+    stt_model = WhisperModel("large-v3-turbo", device="cuda", compute_type="float16")
     print("Whisper ready.", flush=True)
 
     print("Loading Silero VAD...", flush=True)

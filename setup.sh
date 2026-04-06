@@ -80,61 +80,13 @@ else
     echo "  Ollama already running."
 fi
 
-# Convert Romanian fine-tuned Whisper to CTranslate2 format (required by faster-whisper)
-# The model was saved with torch.compile() which adds _orig_mod.model. prefix to all
-# weight keys — we strip those before converting.
-WHISPER_RO_PATH="/workspace/whisper-ro-turbo"
-WHISPER_RO_FIXED="/tmp/whisper-ro-fixed"
-if [ ! -d "$WHISPER_RO_PATH" ]; then
-    echo "  Downloading and fixing IonGrozea/whisper-large-v3-ro-turbo weight keys..."
-    pip install -q ctranslate2 transformers safetensors
-    python3 - <<'PYEOF'
-import os, torch
-from transformers import WhisperForConditionalGeneration, WhisperConfig, WhisperFeatureExtractor
-
-model_id = "IonGrozea/whisper-large-v3-ro-turbo"
-fixed_dir = "/tmp/whisper-ro-fixed"
-
-print("  Loading state dict from HuggingFace...")
-try:
-    import safetensors.torch
-    from huggingface_hub import hf_hub_download
-    path = hf_hub_download(model_id, "model.safetensors")
-    state_dict = safetensors.torch.load_file(path)
-except Exception:
-    from huggingface_hub import hf_hub_download
-    path = hf_hub_download(model_id, "pytorch_model.bin")
-    state_dict = torch.load(path, map_location="cpu")
-
-print("  Stripping _orig_mod.model. prefix from weight keys...")
-prefix = "_orig_mod.model."
-fixed = {}
-for k, v in state_dict.items():
-    fixed[k[len(prefix):] if k.startswith(prefix) else k] = v
-
-print("  Loading into fresh WhisperForConditionalGeneration...")
-config = WhisperConfig.from_pretrained(model_id)
-model = WhisperForConditionalGeneration(config)
-model.load_state_dict(fixed, strict=True)
-model.save_pretrained(fixed_dir)
-
-fe = WhisperFeatureExtractor.from_pretrained(model_id)
-fe.save_pretrained(fixed_dir)
-print(f"  Fixed model saved to {fixed_dir}")
+# Pre-download Whisper model weights (avoids cold-start delay on first request)
+echo "  Pre-downloading Whisper large-v3-turbo model weights (CPU, weights-only)..."
+python3 - <<'PYEOF'
+from faster_whisper import WhisperModel
+WhisperModel("large-v3-turbo", device="cpu", compute_type="int8")
+print("  Whisper weights cached.")
 PYEOF
-
-    echo "  Converting fixed model to CTranslate2 format..."
-    ct2-transformers-converter \
-        --model "$WHISPER_RO_FIXED" \
-        --output_dir "$WHISPER_RO_PATH" \
-        --quantization float16 \
-        --force
-    cp "$WHISPER_RO_FIXED/preprocessor_config.json" "$WHISPER_RO_PATH/"
-    rm -rf "$WHISPER_RO_FIXED"
-    echo "  Romanian Whisper model ready at $WHISPER_RO_PATH"
-else
-    echo "  Romanian Whisper model already converted, skipping."
-fi
 
 # Pull the model directly
 echo "  Pulling gemma4:26b (downloads ~17 GB on first run)..."
