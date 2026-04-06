@@ -90,6 +90,13 @@ if [ ! -d "$WHISPER_RO_PATH" ]; then
         --output_dir "$WHISPER_RO_PATH" \
         --quantization float16 \
         --force
+    # Copy feature extractor config so faster-whisper uses 128 mel bins (large-v3 architecture)
+    python3 -c "
+from transformers import WhisperFeatureExtractor
+fe = WhisperFeatureExtractor.from_pretrained('IonGrozea/whisper-large-v3-ro-turbo')
+fe.save_pretrained('$WHISPER_RO_PATH')
+print('  Feature extractor config saved.')
+"
     echo "  Romanian Whisper model ready at $WHISPER_RO_PATH"
 else
     echo "  Romanian Whisper model already converted, skipping."
