@@ -60,7 +60,7 @@ GREETING_TEXT      = __import__('random').choice(_GREETING_VARIANTS)
 # In-memory audio cache: {audio_id: (mp3_bytes, created_at)}
 _audio_cache: dict[str, tuple[bytes, float]] = {}
 
-MODEL = "qwen3.5:27b-q4_K_M"
+MODEL = "gemma4:27b"
 VOICE = "ro-RO-AlinaNeural"
 SENTENCE_END = re.compile(r'(?<=[.!?])\s')
 
@@ -267,7 +267,7 @@ async def load_models():
         ollama.chat,
         model=MODEL,
         messages=[{"role": "user", "content": "hi"}],
-        options={"temperature": 0, "num_ctx": 8192, "num_predict": 1, "think": False},
+        options={"temperature": 0, "num_ctx": 8192, "num_predict": 1},
     )
     print("Ollama ready.", flush=True)
 
@@ -303,7 +303,7 @@ async def llm_call(messages: list) -> str:
     response = await ollama_async.chat(
         model=MODEL,
         messages=messages,
-        options={"temperature": 0.3, "num_ctx": 8192, "think": False},
+        options={"temperature": 0.3, "num_ctx": 8192},
     )
     return response["message"]["content"].strip()
 
@@ -510,24 +510,14 @@ async def _voice_stream_inner(session_id: str, audio_buffer: io.BytesIO):
     json_detected = False
     pre_json_audio = b""  # buffered until after conflict check
 
-    in_think_block = False  # strip <think>...</think> from Qwen3 thinking mode
-
     async for chunk in await ollama_async.chat(
         model=MODEL,
         messages=messages,
         stream=True,
-        options={"temperature": 0.3, "num_ctx": 8192, "think": False},
+        options={"temperature": 0.3, "num_ctx": 8192},
     ):
         token = chunk["message"]["content"]
         full_response += token
-
-        # Strip Qwen3 thinking blocks — they must never reach TTS
-        if "<think>" in token:
-            in_think_block = True
-        if in_think_block:
-            if "</think>" in token:
-                in_think_block = False
-            continue
 
         if json_detected:
             continue  # keep consuming to get the full response; no more TTS
