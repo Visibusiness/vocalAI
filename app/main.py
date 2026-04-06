@@ -818,10 +818,11 @@ async def twilio_stream(ws: WebSocket):
                                           # (prevents noise/echo immediately after user speech)
 
         async def handle_utterance(frames: list[bytes]):
-            nonlocal is_processing
+            nonlocal is_processing, barge_in_armed_at
             total_audio_secs = 0.0
             should_hangup = False
             was_cancelled = False
+            first_audio_sent = False
             session_id = caller_phone  # phone number → memory persists across calls
             end_marker = struct.pack("<I", 0)
             try:
@@ -837,6 +838,12 @@ async def twilio_stream(ws: WebSocket):
                         mp3_data = chunk[4:]  # strip 4-byte length prefix
                         mulaw_chunks = await run_in_threadpool(_mp3_to_mulaw_chunks, mp3_data)
                         total_audio_secs += await send_mulaw(mulaw_chunks)
+                        if not first_audio_sent:
+                            first_audio_sent = True
+                            # Re-arm grace period from when AI audio actually starts playing,
+                            # not from when STT/LLM processing began. This prevents false
+                            # barge-in triggers during the STT+LLM latency window.
+                            barge_in_armed_at = time_mod.monotonic() + BARGE_IN_GRACE
             except asyncio.CancelledError:
                 was_cancelled = True
                 print(f"[stream] handle_utterance cancelled (barge-in) [{call_sid}]", flush=True)
