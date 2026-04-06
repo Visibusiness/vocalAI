@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 VocalAI is a voice-based conversational AI receptionist ("Sara") for a clinic called TestClinic. It accepts real phone calls via Twilio, transcribes speech, drives an LLM conversation in Romanian, books/cancels/checks Google Calendar appointments, and speaks back to the caller in real time.
 
-**Pipeline:** Twilio mulaw 8kHz → Silero VAD → Whisper large-v3-turbo (STT) → Redis (history) → Ollama/Qwen3.5-27B (LLM) → Google Calendar API → Edge-TTS → mulaw 8kHz → Twilio
+**Pipeline:** Twilio mulaw 8kHz → Silero VAD → Whisper large-v3-turbo (STT) → Redis (history) → Ollama/Gemma-4-26B (LLM) → Google Calendar API → Edge-TTS → mulaw 8kHz → Twilio
 
 ## Running the Server
 
@@ -30,7 +30,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 Twilio Console: Voice webhook → `https://<pod-url>/twilio/incoming` — HTTP POST
 
-**Current RunPod proxy URL:** `https://5ipahenri81624-8000.proxy.runpod.net`
+**Current RunPod proxy URL:** `https://iah5ngs3tm7wbk-8000.proxy.runpod.net`
 
 ## Branches
 
@@ -103,7 +103,7 @@ Key constants (all in `twilio_stream()`):
 | `SILERO_CHUNK_SAMPLES` | 256 | 32ms per Silero inference @ 8kHz |
 | `BARGE_IN_THRESHOLD` | 0.7 | Higher confidence required to interrupt AI |
 | `BARGE_IN_FRAMES` | 3 | ~96ms of confirmed speech to trigger barge-in |
-| `BARGE_IN_GRACE` | 1.5s | Grace period after processing starts before barge-in arms |
+| `BARGE_IN_GRACE` | 1.5s | Grace period after first AI audio plays before barge-in arms |
 | Echo cooldown | `audio_secs + 0.4s` | VAD off while AI audio plays + 0.4s buffer |
 
 ### Barge-in
@@ -115,7 +115,7 @@ When `is_processing=True` (AI is generating/playing response), Silero still runs
 3. `is_processing=False`, `in_speech=True`, `speech_frames` seeded with pre-speech buffer
 4. `handle_utterance` catches `CancelledError` and skips the post-play sleep/drain
 
-The grace period prevents false triggers from background noise immediately after the user stops speaking (before the AI has produced any audio).
+The grace period is armed from when the first AI audio chunk is actually sent (not from when processing starts), so STT+LLM latency (~3-4s) doesn't cause false triggers before Sara has said anything.
 
 ### JSON action system
 
@@ -158,14 +158,15 @@ Functions: `create_appointment`, `check_conflict`, `cancel_appointment`, `get_ap
 
 ### LLM model
 
-- Model: `qwen3.5:27b-q4_K_M` via Ollama, `temperature=0.3`, `num_ctx=8192`
+- Model: `gemma4:26b` via Ollama, `temperature=0.3`, `num_ctx=8192`
+- MoE architecture — runs at ~4B speed while matching or beating Gemma 3 27B quality
 - Streamed via `ollama.AsyncClient` — tokens arrive as async generator, no blocking
 - System prompt built dynamically by `build_system_prompt()` — injects today's date, business hours, and explicit rules for JSON action format
 
 ### Key runtime dependencies
 
 - **Redis** — `localhost:6379`
-- **Ollama** — `localhost:11434` with Gemma-3 model pulled
+- **Ollama** — `localhost:11434` with `gemma4:26b` pulled
 - **CUDA GPU** — Whisper requires `device="cuda", compute_type="float16"`
 - **Edge-TTS** — outbound HTTPS to Microsoft; requires internet
 - **`credentials.json`** — Google service account key in project root
@@ -261,6 +262,7 @@ Main bottleneck is Whisper (~1.5s). Options: streaming Whisper (not yet in faste
 - [x] Barge-in grace period (prevents false triggers on noise) ✅
 - [x] **Romanian +40 Twilio number** — acquired, Digi reachability resolved ✅
 - [x] **Humanized AI persona** — renamed to Sara, natural tone/style rules, sentiment mirroring, randomized greeting variants, few-shot dialogue examples in system prompt ✅
+- [x] **Upgrade LLM to Gemma 4 26B MoE** — faster inference, better quality than Gemma 3 27B ✅
 - [ ] **SMS confirmation** — send booking confirmation SMS after appointment created
 - [ ] **Full-day calendar scan** — "am ceva pe 25 martie?" needs day-range query, not just HH:MM slot
 - [ ] **Update test_client.py** — needs length-prefixed streaming protocol
