@@ -1013,7 +1013,7 @@ async def twilio_stream(ws: WebSocket):
                                 )
                                 is_processing = True
                                 barge_in_count = 0
-                                barge_in_armed_at = time_mod.monotonic() + BARGE_IN_GRACE
+                                barge_in_armed_at = float('inf')  # disarmed until first audio plays
                                 frames_copy = list(speech_frames)
                                 current_utterance_task = asyncio.create_task(handle_utterance(frames_copy))
                             speech_frames = []
