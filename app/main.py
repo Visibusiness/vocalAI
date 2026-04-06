@@ -47,7 +47,7 @@ HANGUP_MARKER = struct.pack('<I', 0xFFFFFFFF)  # 4-byte sentinel, distinct from 
 # --- TWILIO CONFIG ---
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN  = os.environ.get("TWILIO_AUTH_TOKEN", "")
-BASE_URL           = os.environ.get("BASE_URL", "https://5ipahenri81624-8000.proxy.runpod.net")
+BASE_URL           = os.environ.get("BASE_URL", "https://iah5ngs3tm7wbk-8000.proxy.runpod.net")
 
 _GREETING_VARIANTS = [
     "Bună ziua, ați ajuns la TestClinic. Cu ce vă pot ajuta?",
