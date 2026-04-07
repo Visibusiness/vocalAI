@@ -15,7 +15,7 @@ Whisper large-v3-turbo (speech-to-text)
        ↓
 Redis (conversation memory per caller)
        ↓
-Ollama / Qwen3.5-27B (understands + replies in Romanian)
+Ollama / Gemma 4 26B (understands + replies in Romanian)
        ↓
 Google Calendar (books/cancels/checks appointments)
        ↓
@@ -104,6 +104,7 @@ See the **Google Calendar Setup** section in `CLAUDE.md` for full steps.
 
 | What | Where |
 |---|---|
+| **Clinic name, city, doctors, specialties, services, patient names** | `CLINIC CONFIGURATION` block at the top of `app/main.py` — all marked with `# TODO` |
 | AI name / behavior | `build_system_prompt()` in `app/main.py` |
 | TTS voice | `VOICE = "ro-RO-AlinaNeural"` in `app/main.py` |
 | LLM model | `MODEL` in `app/main.py` — `setup.sh` pulls it automatically |

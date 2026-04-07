@@ -85,8 +85,8 @@ Audio pipeline per utterance:
 ```
 Twilio mulaw 8kHz (160 bytes/chunk = 20ms)
 → Silero VAD end-of-speech detection (500ms silence = 25 frames)
-→ audioop.ulaw2lin → numpy upsample 8kHz→16kHz → normalize amplitude → WAV
-→ Whisper large-v3-turbo (initial_prompt for Romanian medical vocab)
+→ audioop.ulaw2lin → scipy sinc resample 8kHz→16kHz → pre-emphasis filter → normalize amplitude → WAV
+→ Whisper large-v3-turbo (beam_size=10, dynamic initial_prompt from CLINIC CONFIGURATION)
 → LLM streaming → per-sentence Edge-TTS
 → pydub MP3→PCM → audioop.lin2ulaw → mulaw 8kHz
 → send back through WebSocket to Twilio
@@ -143,11 +143,16 @@ Functions: `create_appointment`, `check_conflict`, `cancel_appointment`, `get_ap
 
 ### STT model
 
-- Model: `large-v3-turbo` via faster-whisper, `device="cuda"`, `compute_type="float16"`, `vad_filter=True`
+- Model: `large-v3-turbo` via faster-whisper, `device="cuda"`, `compute_type="float16"`, `vad_filter=True`, `beam_size=10`
 - `large-v3-turbo` = same encoder as large-v3 (better than medium for Romanian), pruned decoder → ~2x faster, ~1.6 GB VRAM
 - `vad_filter=True` prevents hallucinations on silence/noise (required for large-v3 based models)
-- `initial_prompt` biases toward Romanian medical vocabulary (names, appointment terms)
-- Audio normalized to 90% peak amplitude before Whisper for consistent quiet calls
+- `beam_size=10` (up from default 5) — more accurate transcription at ~30% extra compute, still fast on GPU
+- `initial_prompt` built dynamically by `_build_whisper_prompt()` from the **CLINIC CONFIGURATION** block — includes clinic name, doctor names, specialties, services, common patient names, Romanian date/time vocabulary, and explicit diacritics words (ă â î ș ț) to prevent stripping
+- Audio pre-processing pipeline (`_build_wav_from_mulaw`):
+  1. `audioop.ulaw2lin` — mulaw decode
+  2. `scipy.signal.resample_poly(up=2, down=1)` — polyphase sinc resampling 8kHz→16kHz (replaces linear interpolation; better transient preservation)
+  3. Pre-emphasis filter `y[n] = x[n] - 0.97·x[n-1]` — boosts high frequencies attenuated by the 300Hz–3400Hz phone passband; improves consonant recognition (ș ț s f v)
+  4. Normalize to 90% peak amplitude
 
 ### VAD model
 
@@ -177,6 +182,22 @@ Functions: `create_appointment`, `check_conflict`, `cancel_appointment`, `get_ap
   - Streaming playback: `httpx.stream()` + length-prefixed protocol; playback queue + background thread
 - **`test_client.py`** — text-based; `--text "..."` converts to WAV via Edge-TTS, sends to server
   - Still uses old non-streaming format — needs updating to length-prefixed protocol
+
+## Clinic Configuration (plug-and-play)
+
+All clinic-specific settings live in the **CLINIC CONFIGURATION** block near the top of `app/main.py`. Every field has a `# TODO` comment. Update these before deploying to a real clinic:
+
+| Variable | Default (test) | What it controls |
+|---|---|---|
+| `CLINIC_NAME` | `"TestClinic"` | Used in Sara's system prompt and Whisper prompt |
+| `CLINIC_CITY` | `"București"` | Whisper prompt context |
+| `CLINIC_DOCTORS` | `["Dr. Popescu", "Dr. Ionescu"]` | Whisper prompt + system prompt |
+| `CLINIC_SPECIALTIES` | `["stomatologie"]` | Whisper prompt |
+| `CLINIC_SERVICES` | detartraj, plombă, etc. | Whisper prompt vocabulary |
+| `CLINIC_COMMON_SURNAMES` | Romanian surnames | Whisper spelling bias |
+| `CLINIC_COMMON_FIRSTNAMES` | Romanian first names | Whisper spelling bias |
+
+The Whisper `initial_prompt` is built automatically from these by `_build_whisper_prompt()` — no manual editing needed.
 
 ## Changing the AI Persona or Voice
 
@@ -237,7 +258,7 @@ Main bottleneck is Whisper (~1.5s). Options: streaming Whisper (not yet in faste
 
 ## Known Limitations
 
-- **8kHz phone audio** — mulaw cuts frequencies above 4kHz; Romanian names still occasionally garbled. `initial_prompt` helps but this is an inherent codec limit.
+- **8kHz phone audio** — mulaw cuts frequencies above 4kHz; Romanian names still occasionally garbled. Pre-emphasis filter, sinc resampling, `beam_size=10`, and rich `initial_prompt` all help but this is an inherent codec limit.
 - **Short utterance STT** — clips under ~2s (e.g. "Da. Confirm.") are more likely to be misrecognized.
 - **Echo cooldown is estimated** — playback duration inferred from byte count; slightly off if Twilio's buffer adds delay.
 - **Full-day calendar scan** — "am ceva pe 25 martie?" (no specific time) sends 00:00 and returns empty. Day-range query not yet implemented.
@@ -263,9 +284,15 @@ Main bottleneck is Whisper (~1.5s). Options: streaming Whisper (not yet in faste
 - [x] **Romanian +40 Twilio number** — acquired, Digi reachability resolved ✅
 - [x] **Humanized AI persona** — renamed to Sara, natural tone/style rules, sentiment mirroring, randomized greeting variants, few-shot dialogue examples in system prompt ✅
 - [x] **Upgrade LLM to Gemma 4 26B MoE** — faster inference, better quality than Gemma 3 27B ✅
-- [ ] **SMS confirmation** — send booking confirmation SMS after appointment created
+- [x] **Fix cancel_appointment bug** — was called with 3 args but accepts 2; cancellations now work ✅
+- [x] **Improve 8kHz phone audio STT quality** — sinc resampling, pre-emphasis filter, beam_size=10, rich dynamic initial_prompt ✅
+- [x] **Plug-and-play CLINIC CONFIGURATION block** — one place to set doctors, specialties, names, city for any clinic ✅
+- [ ] **SMS/WhatsApp confirmation** — skipped for now (Twilio number is voice-only; WhatsApp API not free)
 - [ ] **Full-day calendar scan** — "am ceva pe 25 martie?" needs day-range query, not just HH:MM slot
+- [ ] **Slot suggestion** — Sara can't answer "când ești liber?"; needs `find_free_slots` calendar query
 - [ ] **Update test_client.py** — needs length-prefixed streaming protocol
+- [ ] **Longer Redis TTL** — 600s loses history if patient calls back after 10min; should be hours
+- [ ] **Cache Google Calendar service object** — `_get_service()` re-authenticates on every action; should be a module-level singleton
 - [ ] **PostgreSQL** — replace Redis with persistent DB for call history + audit trail
 - [ ] **Multi-doctor scheduling** — each doctor has own calendar; route by specialty or availability
 - [ ] **Fine-tune STT** — Whisper on Romanian medical vocab (worth doing once real call data exists)
