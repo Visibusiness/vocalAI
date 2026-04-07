@@ -373,7 +373,7 @@ async def handle_calendar_action(
                     "Nu există programări active pentru date trecute."
                 )
             deleted = await run_in_threadpool(
-                cancel_appointment, appointment["date"], appointment["time"], session_id
+                cancel_appointment, appointment["date"], appointment["time"]
             )
             if not deleted:
                 print(f"[main] Anulare: nimic gasit pentru {appointment['date']} {appointment['time']}", flush=True)
