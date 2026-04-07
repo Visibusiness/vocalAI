@@ -13,6 +13,7 @@ from datetime import date as date_type, datetime as dt, timedelta
 from urllib.parse import quote
 
 import numpy as np
+from scipy.signal import resample_poly
 import httpx
 import requests as req_lib
 import torch  # must be imported before faster_whisper to init CUDA lib paths
@@ -63,6 +64,86 @@ _audio_cache: dict[str, tuple[bytes, float]] = {}
 MODEL = "gemma4:26b"
 VOICE = "ro-RO-AlinaNeural"
 SENTENCE_END = re.compile(r'(?<=[.!?])\s')
+
+# ============================================================
+# CLINIC CONFIGURATION
+# NOTE: These are test values for TestClinic (Bucharest, stomatologie).
+#       Replace ALL fields below with your real clinic details before
+#       going live. Everything here feeds directly into the Whisper
+#       initial_prompt — the more accurate, the better STT quality.
+# ============================================================
+
+CLINIC_NAME     = "TestClinic"                        # TODO: replace with real clinic name
+CLINIC_CITY     = "București"                         # TODO: replace with real city
+CLINIC_DOCTORS  = ["Dr. Popescu", "Dr. Ionescu"]      # TODO: replace with real doctor names
+CLINIC_SPECIALTIES = ["stomatologie"]                 # TODO: replace with real specialties
+                                                      #   e.g. ["cardiologie", "dermatologie", "pediatrie"]
+CLINIC_SERVICES = [                                   # TODO: replace with real services offered
+    "consultație stomatologică",
+    "detartraj",
+    "plombă",
+    "extracție dentară",
+    "implant dentar",
+    "ortodonție",
+    "albire dentară",
+    "radiografie dentară",
+    "proteză dentară",
+]
+# Common patient surnames in your area — helps Whisper spell them correctly
+CLINIC_COMMON_SURNAMES = [                            # TODO: add surnames common in your patient base
+    "Popescu", "Ionescu", "Constantin", "Gheorghiu",
+    "Dumitrescu", "Popa", "Stan", "Stoica", "Radu",
+]
+# Common first names in your area
+CLINIC_COMMON_FIRSTNAMES = [                          # TODO: adjust to your patient demographics
+    "Ion", "Maria", "Alexandru", "Gheorghe", "Mihai",
+    "Elena", "Andrei", "Cristina", "Florin", "Ioana",
+    "Vasile", "Nicoleta", "Marian", "Daniela", "Radu",
+]
+# ============================================================
+# END OF CLINIC CONFIGURATION
+# ============================================================
+
+
+def _build_whisper_prompt() -> str:
+    """
+    Build a rich Whisper initial_prompt from clinic config.
+
+    The initial_prompt biases the Whisper decoder toward domain-specific
+    vocabulary and correct Romanian diacritics. It acts as fake prior
+    context — words that appear here are far more likely to appear in
+    the transcript output.
+
+    Key inclusions:
+    - All Romanian diacritics (ă â î ș ț) in natural words so Whisper
+      outputs them rather than stripping them (common 8kHz phone issue)
+    - Doctor names, specialties, services — avoids mangled medical terms
+    - Common names — avoids garbled patient names
+    - Date/time vocabulary — numbers, weekdays, time-of-day expressions
+    - Typical phone-call phrases for appointment booking/cancellation
+    """
+    doctors_str    = " și ".join(CLINIC_DOCTORS)
+    services_str   = ", ".join(CLINIC_SERVICES)
+    specialties_str = ", ".join(CLINIC_SPECIALTIES)
+    surnames_str   = ", ".join(CLINIC_COMMON_SURNAMES)
+    firstnames_str = ", ".join(CLINIC_COMMON_FIRSTNAMES)
+
+    return (
+        f"Apel telefonic la cabinetul {specialties_str} {CLINIC_NAME} din {CLINIC_CITY}. "
+        f"Doctori disponibili: {doctors_str}. "
+        f"Servicii: {services_str}. "
+        "Pacientul sună pentru o programare, anulare sau verificare. "
+        "Zile: luni, marți, miercuri, joi, vineri, sâmbătă, duminică. "
+        "Ore: nouă, zece, unsprezece, douăsprezece, treisprezece, paisprezece, cincisprezece, șaisprezece. "
+        "Mâine, poimâine, săptămâna viitoare, după-amiază, dimineața. "
+        f"Prenume frecvente: {firstnames_str}. "
+        f"Nume de familie: {surnames_str}. "
+        "Fraze uzuale cu diacritice: vreau să fac o programare, aș vrea să anulez, "
+        "aveți loc joi la zece, confirmați vă rog, mulțumesc, bineînțeles, "
+        "înregistrat, după-amiază, întrebări, față, mână, câștig, înainte, "
+        "ședință, față, țin, ăsta, îmi, ești, ați, vă rog, ță, dați-mi. "
+        "Da. Nu. Confirm. Corect."
+    )
 
 # --- CONECTARE REDIS ---
 redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
@@ -477,12 +558,9 @@ async def _voice_stream_inner(session_id: str, audio_buffer: io.BytesIO):
         get_stt_model().transcribe,
         audio_buffer,
         language="ro",
+        beam_size=10,       # default 5 — higher = more accurate, ~30% slower (still fast on GPU)
         vad_filter=True,
-        initial_prompt=(
-            "Consultație medicală. Programare la clinică. "
-            "Prenume și nume de familie. Pacient. Doctor. "
-            "Data și ora programării. Confirmare. Anulare."
-        ),
+        initial_prompt=_build_whisper_prompt(),
     )
     user_text = " ".join([s.text for s in segments]).strip()
     print(f"User [{session_id}]: {user_text}", flush=True)
@@ -617,21 +695,33 @@ async def voice_to_mp3(session_id: str, audio_buffer: io.BytesIO) -> bytes:
 def _build_wav_from_mulaw(mulaw_data: bytes) -> io.BytesIO:
     """Convert raw mulaw 8kHz bytes → WAV BytesIO at 16kHz (for Whisper).
 
-    Uses numpy linear interpolation for upsampling — better quality than audioop.ratecv
-    while avoiding a scipy dependency.
+    Audio processing steps:
+    1. Decode mulaw → linear PCM (int16)
+    2. Upsample 8kHz → 16kHz via polyphase sinc resampling (resample_poly)
+       — significantly better than linear interpolation: preserves transients,
+         avoids smearing, and reduces aliasing artifacts from phone audio.
+    3. Pre-emphasis filter (y[n] = x[n] - 0.97 * x[n-1])
+       — phone audio (300Hz–3400Hz passband) is bass-heavy; this filter
+         boosts high frequencies to compensate, helping Whisper recognise
+         consonants (ș, ț, s, f, v) that 8kHz mulaw attenuates.
+    4. Normalize amplitude to 90% peak for consistent Whisper input level.
     """
     pcm_8k = audioop.ulaw2lin(mulaw_data, 2)
     samples_8k = np.frombuffer(pcm_8k, dtype=np.int16).astype(np.float32)
-    # Upsample 8kHz → 16kHz via linear interpolation
-    n_out = len(samples_8k) * 2
-    x_in  = np.arange(len(samples_8k))
-    x_out = np.linspace(0, len(samples_8k) - 1, n_out)
-    samples_16k = np.interp(x_out, x_in, samples_8k)
-    # Normalize amplitude so Whisper gets a consistent signal level
+
+    # Step 2 — polyphase sinc resampling 8kHz → 16kHz (up=2, down=1)
+    samples_16k = resample_poly(samples_8k, up=2, down=1)
+
+    # Step 3 — pre-emphasis: boost high frequencies attenuated by phone codec
+    PRE_EMPHASIS = 0.97
+    samples_16k[1:] -= PRE_EMPHASIS * samples_16k[:-1]
+
+    # Step 4 — normalize amplitude
     peak = np.abs(samples_16k).max()
     if peak > 0:
         samples_16k = samples_16k / peak * 32767 * 0.9
     samples_16k = samples_16k.astype(np.int16)
+
     pcm_16k = samples_16k.tobytes()
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
