@@ -78,6 +78,46 @@ def check_conflict(date_str: str, time_str: str) -> bool:
     return len(events_result.get("items", [])) > 0
 
 
+def get_appointments_for_day(date_str: str) -> list[dict]:
+    """
+    Return all appointments for an entire day (00:00–23:59) in Europe/Bucharest.
+
+    Args:
+        date_str : date in "YYYY-MM-DD" format
+
+    Returns:
+        List of dicts with keys 'summary' and 'time' (HH:MM string).
+    """
+    try:
+        day_start = datetime.strptime(date_str, "%Y-%m-%d").replace(
+            hour=0, minute=0, second=0, tzinfo=BUCHAREST_TZ
+        )
+    except ValueError:
+        return []
+
+    day_end = day_start + timedelta(days=1)
+
+    service = _get_service()
+    events_result = service.events().list(
+        calendarId=CALENDAR_ID,
+        timeMin=day_start.isoformat(),
+        timeMax=day_end.isoformat(),
+        singleEvents=True,
+        orderBy="startTime",
+    ).execute()
+
+    result = []
+    for e in events_result.get("items", []):
+        start_raw = e.get("start", {}).get("dateTime", "")
+        try:
+            start_dt = datetime.fromisoformat(start_raw).astimezone(BUCHAREST_TZ)
+            time_str = start_dt.strftime("%H:%M")
+        except Exception:
+            time_str = "?"
+        result.append({"summary": e.get("summary", "Programare"), "time": time_str})
+    return result
+
+
 def get_appointments(date_str: str, time_str: str) -> list[str]:
     """
     Return a list of event summaries found at the given date/time slot.

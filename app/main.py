@@ -32,7 +32,7 @@ from ollama import AsyncClient
 from app.appointment_parser import extract_appointment
 from app.calendar_service import (
     create_appointment, check_conflict, cancel_appointment,
-    get_appointments, list_appointments,
+    get_appointments, get_appointments_for_day, list_appointments,
 )
 
 app = FastAPI()
@@ -278,12 +278,20 @@ Anulare (după confirmare):
 }}
 ```
 
-Verificare (imediat, fără confirmare):
+Verificare la oră specifică (imediat, fără confirmare):
 ```json
 {{
   "action": "check",
   "date": "YYYY-MM-DD",
   "time": "HH:MM"
+}}
+```
+
+Verificare pentru o zi întreagă — când pacientul nu specifică ora (ex: "am ceva pe 25 martie?"):
+```json
+{{
+  "action": "check",
+  "date": "YYYY-MM-DD"
 }}
 ```
 
@@ -478,27 +486,55 @@ async def handle_calendar_action(
                     f"Data de {appointment['date']} este în trecut. "
                     "Puteți verifica doar programări viitoare."
                 )
-            events = await run_in_threadpool(
-                get_appointments, appointment["date"], appointment["time"]
-            )
-            if events:
-                result_msg = (
-                    f"Rezultat verificare din sistem: există o programare pe {appointment['date']} "
-                    f"la ora {appointment['time']}: {', '.join(events)}. "
-                    "Informează pacientul și întreabă dacă dorește să o anuleze sau dacă mai are alte întrebări. "
-                    "Nu include niciun bloc JSON în răspuns."
+
+            time_str = appointment.get("time")
+            if time_str:
+                # Specific slot check
+                events_raw = await run_in_threadpool(
+                    get_appointments, appointment["date"], time_str
                 )
+                if events_raw:
+                    result_msg = (
+                        f"Rezultat verificare din sistem: există o programare pe {appointment['date']} "
+                        f"la ora {time_str}: {', '.join(events_raw)}. "
+                        "Informează pacientul și întreabă dacă dorește să o anuleze sau dacă mai are alte întrebări. "
+                        "Nu include niciun bloc JSON în răspuns."
+                    )
+                else:
+                    result_msg = (
+                        f"Rezultat verificare din sistem: nu există nicio programare pe {appointment['date']} "
+                        f"la ora {time_str}. "
+                        "Informează pacientul și întreabă dacă dorește să programeze o consultație. "
+                        "Nu include niciun bloc JSON în răspuns."
+                    )
+                has_events = bool(events_raw)
             else:
-                result_msg = (
-                    f"Rezultat verificare din sistem: nu există nicio programare pe {appointment['date']} "
-                    f"la ora {appointment['time']}. "
-                    "Informează pacientul și întreabă dacă dorește să programeze o consultație. "
-                    "Nu include niciun bloc JSON în răspuns."
+                # Full-day scan — patient didn't specify a time
+                day_events = await run_in_threadpool(
+                    get_appointments_for_day, appointment["date"]
                 )
+                if day_events:
+                    lines = ", ".join(
+                        f"{e['time']} ({e['summary']})" for e in day_events
+                    )
+                    result_msg = (
+                        f"Rezultat verificare din sistem: pe {appointment['date']} există "
+                        f"următoarele programări: {lines}. "
+                        "Informează pacientul despre programările găsite și întreabă dacă dorește să modifice ceva. "
+                        "Nu include niciun bloc JSON în răspuns."
+                    )
+                else:
+                    result_msg = (
+                        f"Rezultat verificare din sistem: nu există nicio programare pe {appointment['date']}. "
+                        "Informează pacientul că ziua este liberă și întreabă dacă dorește să facă o programare. "
+                        "Nu include niciun bloc JSON în răspuns."
+                    )
+                has_events = bool(day_events)
+
             print(f"[main] Check result: {result_msg}", flush=True)
             messages.append({"role": "system", "content": result_msg})
             reply = await llm_call(messages)
-            return reply or ("Există o programare." if events else "Nu există nicio programare.")
+            return reply or ("Există o programare." if has_events else "Nu există nicio programare.")
 
         elif action == "list":
             appts = await run_in_threadpool(list_appointments, session_id)

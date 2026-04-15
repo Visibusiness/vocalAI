@@ -17,7 +17,7 @@ _JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
 
 REQUIRED_KEYS_SCHEDULE = {"action", "name", "date", "time"}
 REQUIRED_KEYS_CANCEL = {"action", "date", "time"}
-REQUIRED_KEYS_CHECK = {"action", "date", "time"}
+REQUIRED_KEYS_CHECK = {"action", "date"}  # time is optional — omit for full-day scan
 REQUIRED_KEYS_LIST = {"action"}
 
 
