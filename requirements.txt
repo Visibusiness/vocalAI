@@ -1,8 +1,24 @@
 numpy<2.0.0
 scipy
-sounddevice
-faster-whisper
+faster-whisper>=1.1.0
+ctranslate2>=4.0.0
 nvidia-cublas-cu12
 nvidia-cudnn-cu12
 nvidia-curand-cu12
+edge-tts
+torch
 ollama
+redis
+fastapi
+uvicorn[standard]
+python-multipart
+httpx
+requests
+pydub
+
+onnxruntime
+tzdata
+
+# Google Calendar integration
+google-api-python-client
+google-auth

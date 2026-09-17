@@ -1,0 +1,9 @@
+venv/
+.venv/
+.session_id
+*.mp3
+*.wav
+
+# Google credentials — never commit real files
+credentials.json
+vocalai-*.json
